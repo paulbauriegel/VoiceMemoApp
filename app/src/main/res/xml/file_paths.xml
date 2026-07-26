@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Every URI is still protected by an explicit, temporary grant on the
+         Android sharesheet intent. No broad external-storage path is exposed. -->
+    <files-path
+        name="memo_audio"
+        path="memos/" />
+    <cache-path
+        name="shared_memos"
+        path="shares/" />
+</paths>

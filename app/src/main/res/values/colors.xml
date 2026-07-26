@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="voice_memo_window_background">#FFF8F5</color>
+    <color name="voice_memo_window_background_dark">#1A0D08</color>
+    <color name="voice_memo_accent">#9D3B2D</color>
+    <color name="voice_memo_icon_background">#082454</color>
+</resources>

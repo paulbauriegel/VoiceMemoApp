@@ -1,0 +1,130 @@
+package com.example.voicememo
+
+import android.content.Context
+import androidx.work.WorkManager
+import com.example.voicememo.backup.RoomVoiceMemoBackupManager
+import com.example.voicememo.backup.VoiceMemoBackupManager
+import com.example.voicememo.data.MemoDeletionHooks
+import com.example.voicememo.data.MemoRecord
+import com.example.voicememo.data.MemoRepository
+import com.example.voicememo.data.RoomMemoRepository
+import com.example.voicememo.data.VoiceMemoDatabase
+import com.example.voicememo.importing.AndroidAudioImporter
+import com.example.voicememo.importing.AudioImporter
+import com.example.voicememo.playback.Media3MemoPlayer
+import com.example.voicememo.playback.MemoPlayer
+import com.example.voicememo.recording.AndroidRecorderController
+import com.example.voicememo.recording.RecorderController
+import com.example.voicememo.sharing.ShareExporter
+import com.example.voicememo.settings.TranscriptionPreferences
+import com.example.voicememo.work.TranscriptionCoordinator
+import com.example.voicememo.work.WorkManagerTranscriptionCoordinator
+import java.io.File
+import java.io.Closeable
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+class AppContainer(
+    context: Context,
+) : Closeable {
+    private val applicationContext = context.applicationContext
+    val database: VoiceMemoDatabase by lazy { VoiceMemoDatabase.create(applicationContext) }
+    val workManager: WorkManager by lazy { WorkManager.getInstance(applicationContext) }
+    val recorderController: RecorderController by lazy { AndroidRecorderController(applicationContext) }
+    val memoPlayer: MemoPlayer by lazy { Media3MemoPlayer(applicationContext) }
+    val shareExporter: ShareExporter by lazy { ShareExporter(applicationContext) }
+    val transcriptionPreferences: TranscriptionPreferences by lazy {
+        TranscriptionPreferences(applicationContext)
+    }
+    val backupManager: VoiceMemoBackupManager by lazy {
+        RoomVoiceMemoBackupManager(
+            database = database,
+            memoRoot = File(applicationContext.filesDir, "memos"),
+        )
+    }
+    val transcriptionCoordinator: TranscriptionCoordinator by lazy {
+        WorkManagerTranscriptionCoordinator(
+            workManager = workManager,
+            repository = memoRepository,
+        )
+    }
+
+    val memoRepository: MemoRepository by lazy {
+        RoomMemoRepository(
+            database = database,
+            deletionHooks = PrivateMemoDeletionHooks(
+                context = applicationContext,
+                workManager = workManager,
+            ),
+        )
+    }
+    val audioImporter: AudioImporter by lazy {
+        AndroidAudioImporter(
+            context = applicationContext,
+            memoRepository = memoRepository,
+        )
+    }
+
+    override fun close() {
+        (memoPlayer as? Closeable)?.close()
+        if (database.isOpen) database.close()
+    }
+}
+
+private class PrivateMemoDeletionHooks(
+    context: Context,
+    private val workManager: WorkManager,
+) : MemoDeletionHooks {
+    private val memoRoot = File(context.filesDir, "memos")
+
+    override suspend fun cancelTranscriptions(memoIds: Set<String>) = withContext(Dispatchers.IO) {
+        memoIds.forEach { memoId ->
+            workManager.cancelAllWorkByTag("memo:$memoId").result.get()
+        }
+    }
+
+    override suspend fun deletePrivateFiles(memos: List<MemoRecord>) = withContext(Dispatchers.IO) {
+        val canonicalRoot = memoRoot.canonicalFile
+        val directories = memos
+            .flatMap { memo ->
+                listOfNotNull(
+                    File(memo.audioPath).parentFile,
+                    memo.waveformPath?.let(::File)?.parentFile,
+                )
+            }
+            .map(File::getCanonicalFile)
+            .distinct()
+
+        directories.forEach { directory ->
+            require(directory.parentFile == canonicalRoot) {
+                "Refusing to delete a path outside the private memo directory."
+            }
+        }
+
+        val staged = mutableListOf<Pair<File, File>>()
+        try {
+            directories.filter(File::exists).forEach { source ->
+                val target = File(
+                    canonicalRoot,
+                    ".deleting-${source.name}-${UUID.randomUUID()}",
+                )
+                check(source.renameTo(target)) {
+                    "Could not stage ${source.name} for permanent deletion."
+                }
+                staged += source to target
+            }
+        } catch (failure: Throwable) {
+            staged.asReversed().forEach { (source, target) ->
+                if (target.exists()) target.renameTo(source)
+            }
+            throw failure
+        }
+
+        staged.forEach { (_, target) ->
+            check(target.deleteRecursively()) {
+                "Could not permanently delete ${target.name}."
+            }
+        }
+    }
+}

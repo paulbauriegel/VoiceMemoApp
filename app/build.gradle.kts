@@ -1,0 +1,1169 @@
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.util.zip.ZipFile
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.kapt")
+}
+
+val whisperWorkerCount = providers.gradleProperty("whisperWorkerCount")
+    .orElse("2")
+    .map(String::toInt)
+val whisperThreadsPerWorker = providers.gradleProperty("whisperThreadsPerWorker")
+    .orElse("3")
+    .map(String::toInt)
+val whisperBackend = providers.gradleProperty("whisperBackend")
+    .orElse("cpu")
+    .map { it.trim().lowercase() }
+val includeDecoderSplitDiagnostics = providers
+    .gradleProperty("includeDecoderSplitDiagnostics")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeDecoderSplitDiagnostics must be true or false.")
+    }
+val includeRewrittenDecoderPrefixDiagnostic = providers
+    .gradleProperty("includeRewrittenDecoderPrefixDiagnostic")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeRewrittenDecoderPrefixDiagnostic must be true or false.")
+    }
+val includeFullFloatDecoderDiagnostic = providers
+    .gradleProperty("includeFullFloatDecoderDiagnostic")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeFullFloatDecoderDiagnostic must be true or false.")
+    }
+val useFullFloatDecoderProduction = providers
+    .gradleProperty("useFullFloatDecoderProduction")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("useFullFloatDecoderProduction must be true or false.")
+    }
+val rewrittenDecoderPrefixStage = providers
+    .gradleProperty("rewrittenDecoderPrefixStage")
+    .orElse("after-position-add")
+    .map { value ->
+        require(
+            value in setOf(
+                "after-position-add",
+                "after-self-layer-norm",
+                "after-self-key-projection",
+                "after-self-query-projection",
+                "after-self-query-reshape",
+                "after-self-key-transpose",
+                "after-self-score-matmul",
+                "after-self-mask-add",
+                "after-self-softmax",
+                "after-self-value-projection",
+                "after-self-value-reshape",
+                "after-self-value-matmul",
+                "after-self-context-reshape",
+                "after-self-output-projection",
+                "after-self-attention",
+                "after-cross-attention",
+                "after-1-block",
+                "after-2-blocks",
+                "after-3-blocks",
+                "after-4-blocks",
+                "after-final-layer-norm",
+            ),
+        ) {
+            "rewrittenDecoderPrefixStage is not a supported decoder boundary."
+        }
+        value
+    }
+val rewrittenDecoderPrefixSha256 = providers
+    .gradleProperty("rewrittenDecoderPrefixSha256")
+    .orElse("")
+    .map(String::lowercase)
+val rewrittenDecoderPrefixBytes = providers
+    .gradleProperty("rewrittenDecoderPrefixBytes")
+    .orElse("1094571944")
+    .map { value ->
+        value.toLongOrNull()?.also {
+            require(it in 1_000_000_000L..1_200_000_000L) {
+                "rewrittenDecoderPrefixBytes is outside the fail-closed diagnostic range."
+            }
+        } ?: error("rewrittenDecoderPrefixBytes must be an integer.")
+    }
+val useStrictMathGpuProbe = providers
+    .gradleProperty("useStrictMathGpuProbe")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("useStrictMathGpuProbe must be true or false.")
+    }
+val installReleaseLocally = providers
+    .gradleProperty("installReleaseLocally")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("installReleaseLocally must be true or false.")
+    }
+val decoderSplitDiagnosticStage = providers
+    .gradleProperty("decoderSplitDiagnosticStage")
+    .orElse("post-layernorm")
+    .map { value ->
+        require(
+            value in setOf(
+                "post-layernorm",
+                "pre-layernorm",
+                "after-position-add",
+                "after-cross-attention",
+                "after-1-block",
+                "after-2-blocks",
+                "after-3-blocks",
+            ),
+        ) {
+            "decoderSplitDiagnosticStage must be post-layernorm, pre-layernorm, " +
+                "after-position-add, after-cross-attention, after-1-block, " +
+                "after-2-blocks, or after-3-blocks."
+        }
+        value
+    }
+val decoderSplitDiagnosticDirectory =
+    rootProject.layout.projectDirectory.dir("build/generated/whisper-decoder-split")
+val decoderSplitDiagnosticAssetRoot =
+    layout.buildDirectory.dir("generated/decoderSplitAndroidTestAssets")
+val rewrittenDecoderPrefixFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/decoder-prefix.tflite",
+)
+val rewrittenDecoderSoftmaxProbeFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/softmax-probe.tflite",
+)
+val rewrittenDecoderSoftmaxProbeSha256 =
+    "0dda1b63e41cb5aff06f1a0141ccefc3b851402119ca04315f02e829af1258b1"
+val rewrittenDecoderMaskAddProbeFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/mask-add-probe.tflite",
+)
+val rewrittenDecoderMaskAddProbeSha256 =
+    "b55f04c5c4667bdb9333b79b327cfde35493fc217ffe186f8087f66965fc213d"
+val rewrittenDecoderScoreProbeFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/score-probe.tflite",
+)
+val rewrittenDecoderScoreProbeSha256 =
+    "358ecf5bef1d39b739dfc54125a5a6d5273898adc7784625757485717a280dfd"
+val rewrittenDecoderValueProbeFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/value-probe.tflite",
+)
+val rewrittenDecoderValueProbeSha256 =
+    "6abd8afd394af3005e7304432e85e78d5058193fa9bd5ae7d00d7e4315fea861"
+val rewrittenDecoderKProjectionProbeFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-decoder-prefix/k-projection-probe.tflite",
+)
+val rewrittenDecoderKProjectionProbeSha256 =
+    "7a30331ccb89e332edb176587d149f8d852e5b224864247defadae37db940b1d"
+val rewrittenDecoderPrefixAssetRoot =
+    layout.buildDirectory.dir("generated/rewrittenDecoderPrefixAndroidTestAssets")
+val fullFloatDecoderDiagnosticFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-full-float-decoder/" +
+        "whisper_large_v3_turbo_full_float_decoder.tflite",
+)
+val fullFloatDecoderDiagnosticBytes = 1_779_622_096L
+val fullFloatDecoderDiagnosticSha256 =
+    "a2613d64e6cb73ff40db7c548215fd086f096aa088c6cc113c833ccc87501e89"
+val fullFloatDecoderDiagnosticAssetRoot =
+    layout.buildDirectory.dir("generated/fullFloatDecoderAndroidTestAssets")
+val fullFloatDecoderProductionAssetRoot =
+    layout.buildDirectory.dir("generated/fullFloatDecoderProductionAssets")
+val fullFloatDecoderProductionAssetPath =
+    "whisper/whisper_large_v3_turbo_full_float_decoder.tflite"
+val sileroVadAssetRoot =
+    layout.projectDirectory.dir("src/main/generatedVadAssets")
+val strictMathGpuProbeAar = rootProject.layout.projectDirectory.file(
+    "build/generated/litert-strict-math-probe/litert-2.1.6-strict-math-probe.aar",
+)
+val strictMathGpuProbeExpectedBytes = 33_633_920L
+val strictMathGpuProbeExpectedSha256 =
+    "322ba49f63712569ece6d7ead0ec1c6075d55766728e4de52be1f5a327b8ffc3"
+val strictMathGpuProbeAcceleratorEntry =
+    "jni/arm64-v8a/libLiteRtClGlAccelerator.so"
+val strictMathGpuProbePatchedAcceleratorSha256 =
+    "9dbc2ff9a9c2b0297fecb3fb5ac48df0442c0707224627a2e76ac3270b0d89b6"
+val strictMathGpuProbeFlag = "-cl-fast-relaxed-math".toByteArray(Charsets.US_ASCII)
+val strictMathGpuProbeFlagOffset = 0x510c7
+
+require(whisperWorkerCount.get() in 1..2) {
+    "whisperWorkerCount must be 1 or 2."
+}
+require(whisperThreadsPerWorker.get() in 1..8) {
+    "whisperThreadsPerWorker must be between 1 and 8."
+}
+require(whisperBackend.get() in setOf("cpu", "gpu")) {
+    "whisperBackend must be cpu or gpu."
+}
+require(
+    !useFullFloatDecoderProduction.get() ||
+        (
+            whisperBackend.get() == "gpu" &&
+                whisperWorkerCount.get() == 1
+            )
+) {
+    """
+    useFullFloatDecoderProduction requires whisperBackend=gpu and
+    whisperWorkerCount=1 because one rewritten GPU model peaks above 4 GB PSS.
+    """.trimIndent()
+}
+require(!useStrictMathGpuProbe.get() || includeDecoderSplitDiagnostics.get()) {
+    """
+    useStrictMathGpuProbe is a diagnostic-only dependency substitution.
+    Re-run with both -PuseStrictMathGpuProbe=true and
+    -PincludeDecoderSplitDiagnostics=true.
+    """.trimIndent()
+}
+
+android {
+    namespace = "com.example.voicememo"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.example.voicememo"
+        // Silero VAD runs through the official ONNX Runtime Android package,
+        // whose supported Android floor is API 24.
+        minSdk = 24
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
+        buildConfigField("int", "WHISPER_WORKER_COUNT", whisperWorkerCount.get().toString())
+        buildConfigField(
+            "int",
+            "WHISPER_THREADS_PER_WORKER",
+            whisperThreadsPerWorker.get().toString(),
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_BACKEND_REQUESTED",
+            "\"${whisperBackend.get()}\"",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_MODEL_ASSET_PATH",
+            if (useFullFloatDecoderProduction.get()) {
+                "\"$fullFloatDecoderProductionAssetPath\""
+            } else {
+                "\"whisper/whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite\""
+            },
+        )
+        buildConfigField(
+            "long",
+            "WHISPER_MODEL_SIZE_BYTES",
+            if (useFullFloatDecoderProduction.get()) {
+                "${fullFloatDecoderDiagnosticBytes}L"
+            } else {
+                "1094571944L"
+            },
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_MODEL_SHA256",
+            if (useFullFloatDecoderProduction.get()) {
+                "\"$fullFloatDecoderDiagnosticSha256\""
+            } else {
+                "\"8e69e43d7773b856a93cc192f6308adc1d1e6c921d48c91c684bc78bf6e91418\""
+            },
+        )
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables.useSupportLibrary = true
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    buildTypes {
+        getByName("release") {
+            // Normal release builds remain unsigned. The shared Android Studio
+            // "Install Release" configuration opts into the debug key so AGP
+            // can update the locally installed app without deleting its data.
+            if (installReleaseLocally.get()) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        getByName("main").assets.srcDir(sileroVadAssetRoot)
+        if (useFullFloatDecoderProduction.get()) {
+            getByName("main").assets.srcDir(fullFloatDecoderProductionAssetRoot)
+        } else {
+            getByName("main").assets.srcDir("src/main/generatedAssets")
+        }
+        if (includeDecoderSplitDiagnostics.get()) {
+            // Large generated models are packaged only into the opt-in
+            // instrumentation APK. They never replace production app assets.
+            getByName("androidTest").assets.srcDir(decoderSplitDiagnosticAssetRoot)
+        }
+        if (includeRewrittenDecoderPrefixDiagnostic.get()) {
+            // This fail-closed prefix model is diagnostic-only and is never
+            // included in the production APK.
+            getByName("androidTest").assets.srcDir(rewrittenDecoderPrefixAssetRoot)
+        }
+        if (includeFullFloatDecoderDiagnostic.get()) {
+            // Complete-decoder FLOAT32 weights and mask-rank barriers remain
+            // isolated to the opt-in instrumentation APK.
+            getByName("androidTest").assets.srcDir(fullFloatDecoderDiagnosticAssetRoot)
+        }
+    }
+
+    androidResources {
+        // LiteRT maps the model directly from the APK file descriptor. Deflating
+        // this entry would require another ~1.09 GB copy and prevent mmap.
+        noCompress += "tflite"
+        noCompress += "onnx"
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+        resources {
+            excludes += setOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "/META-INF/DEPENDENCIES",
+            )
+        }
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+        freeCompilerArgs.addAll(
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+        )
+    }
+}
+
+kapt {
+    correctErrorTypes = true
+    arguments {
+        arg("room.schemaLocation", "$projectDir/schemas")
+        arg("room.incremental", "true")
+        arg("room.expandProjection", "true")
+    }
+}
+
+val whisperAssetDirectory = layout.projectDirectory.dir("src/main/generatedAssets/whisper")
+val requiredWhisperAssets = mapOf(
+    "whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite" to (
+        1_094_571_944L to "8e69e43d7773b856a93cc192f6308adc1d1e6c921d48c91c684bc78bf6e91418"
+        ),
+    "tokenizer.json" to (
+        2_710_337L to "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+        ),
+    "generation_config.json" to (
+        3_772L to "cce11bfe3aaa6ae9e072ea2637caaec8795e68d9b67e655a5af16ee509681a4c"
+        ),
+    "preprocessor_config.json" to (
+        340L to "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        ),
+)
+
+val verifyWhisperAssets by tasks.registering {
+    group = "verification"
+    description = "Checks that the pinned offline Whisper assets have been fetched and verified."
+    inputs.files(requiredWhisperAssets.keys.map { whisperAssetDirectory.file(it) })
+
+    doLast {
+        val missing = requiredWhisperAssets.keys
+            .map { whisperAssetDirectory.file(it).asFile }
+            .filterNot { it.isFile }
+        check(missing.isEmpty()) {
+            """
+            Offline Whisper assets are missing:
+            ${missing.joinToString(separator = "\n") { " - ${it.relativeTo(projectDir)}" }}
+
+            Run scripts/fetch-whisper-assets.sh, then build again. The script downloads
+            revision 4e3af6a1597a54b6e47d2899cf4f6c39932b0b7e and verifies every asset.
+            """.trimIndent()
+        }
+
+        requiredWhisperAssets.forEach { (fileName, expected) ->
+            val (expectedBytes, expectedSha256) = expected
+            val assetFile = whisperAssetDirectory.file(fileName).asFile
+            check(assetFile.length() == expectedBytes) {
+                "$fileName has ${assetFile.length()} bytes; expected $expectedBytes. Re-run scripts/fetch-whisper-assets.sh."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            assetFile.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualSha256 == expectedSha256) {
+                "$fileName SHA-256 is $actualSha256; expected $expectedSha256. Delete generatedAssets and fetch again."
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifyWhisperAssets)
+}
+
+val sileroVadAsset = sileroVadAssetRoot.file("silero/silero_vad.onnx")
+val verifySileroVadAsset by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned offline Silero VAD v6.2.1 model."
+    inputs.file(sileroVadAsset)
+
+    doLast {
+        val assetFile = sileroVadAsset.asFile
+        check(assetFile.isFile) {
+            """
+            Offline Silero VAD asset is missing:
+             - ${assetFile.relativeTo(projectDir)}
+
+            Run scripts/fetch-silero-vad-assets.sh, then build again.
+            """.trimIndent()
+        }
+        check(assetFile.length() == 2_327_524L) {
+            "silero_vad.onnx has ${assetFile.length()} bytes; expected 2327524. " +
+                "Re-run scripts/fetch-silero-vad-assets.sh."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        assetFile.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        check(
+            actualSha256 ==
+                "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+        ) {
+            "silero_vad.onnx SHA-256 is $actualSha256; expected the pinned v6.2.1 model."
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifySileroVadAsset)
+}
+
+val verifyStrictMathGpuProbeAar by tasks.registering {
+    group = "verification"
+    description =
+        "Verifies the opt-in generated LiteRT OpenCL strict-math diagnostic AAR."
+    onlyIf { useStrictMathGpuProbe.get() }
+    inputs.file(strictMathGpuProbeAar)
+    inputs.property("expectedSha256", strictMathGpuProbeExpectedSha256)
+    inputs.property("patchedAcceleratorSha256", strictMathGpuProbePatchedAcceleratorSha256)
+
+    doLast {
+        val aarFile = strictMathGpuProbeAar.asFile
+        check(aarFile.isFile) {
+            """
+            Strict-math LiteRT diagnostic AAR is missing:
+             - ${aarFile.relativeTo(rootProject.projectDir)}
+
+            Run scripts/prepare-litert-strict-math-gpu-probe.sh, then rebuild
+            with -PincludeDecoderSplitDiagnostics=true
+            -PuseStrictMathGpuProbe=true.
+            """.trimIndent()
+        }
+        check(aarFile.length() == strictMathGpuProbeExpectedBytes) {
+            "Strict-math probe AAR has ${aarFile.length()} bytes; " +
+                "expected $strictMathGpuProbeExpectedBytes."
+        }
+        val aarDigest = MessageDigest.getInstance("SHA-256")
+        aarFile.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                aarDigest.update(buffer, 0, count)
+            }
+        }
+        val actualAarSha256 = aarDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualAarSha256 == strictMathGpuProbeExpectedSha256) {
+            "Strict-math probe AAR SHA-256 is $actualAarSha256; " +
+                "expected $strictMathGpuProbeExpectedSha256. Re-run " +
+                "scripts/prepare-litert-strict-math-gpu-probe.sh."
+        }
+
+        ZipFile(aarFile).use { archive ->
+            val acceleratorEntry = checkNotNull(
+                archive.getEntry(strictMathGpuProbeAcceleratorEntry),
+            ) {
+                "Strict-math probe AAR is missing $strictMathGpuProbeAcceleratorEntry."
+            }
+            val acceleratorBytes = archive.getInputStream(acceleratorEntry).use { it.readBytes() }
+            val acceleratorSha256 = MessageDigest.getInstance("SHA-256")
+                .digest(acceleratorBytes)
+                .joinToString("") { "%02x".format(it) }
+            check(acceleratorSha256 == strictMathGpuProbePatchedAcceleratorSha256) {
+                "Patched arm64 accelerator SHA-256 is $acceleratorSha256; " +
+                    "expected $strictMathGpuProbePatchedAcceleratorSha256."
+            }
+            check(acceleratorBytes[strictMathGpuProbeFlagOffset] == 0.toByte()) {
+                "Strict-math probe byte at 0x${strictMathGpuProbeFlagOffset.toString(16)} " +
+                    "is not NUL."
+            }
+            check(
+                acceleratorBytes.copyOfRange(
+                    strictMathGpuProbeFlagOffset + 1,
+                    strictMathGpuProbeFlagOffset + strictMathGpuProbeFlag.size,
+                ).contentEquals(strictMathGpuProbeFlag.copyOfRange(1, strictMathGpuProbeFlag.size)),
+            ) {
+                "Strict-math probe flag suffix changed unexpectedly."
+            }
+            check(
+                (0..acceleratorBytes.size - strictMathGpuProbeFlag.size).none { offset ->
+                    strictMathGpuProbeFlag.indices.all { index ->
+                        acceleratorBytes[offset + index] == strictMathGpuProbeFlag[index]
+                    }
+                },
+            ) {
+                "-cl-fast-relaxed-math remains in the patched arm64 accelerator."
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    if (useStrictMathGpuProbe.get()) {
+        dependsOn(verifyStrictMathGpuProbeAar)
+    }
+}
+
+val decoderSplitDiagnosticAssets = mapOf(
+    "whisper_large_v3_turbo_30s_i4_decode_hidden.tflite" to (
+        755_273_648L to "a73a5d6acdd2e9271b7bced77ba784bad2c9716f4946cdc9145e0d70d97e1d0b"
+        ),
+    "whisper_large_v3_turbo_active_row_projection_i8.tflite" to (
+        67_011_640L to "220e0fa46e2bdcf3d0396762fb1bd39df169615458107ed2af28184c78ebbb35"
+        ),
+)
+val selectedDecoderSplitDiagnosticAssets = when (decoderSplitDiagnosticStage.get()) {
+    "post-layernorm" -> decoderSplitDiagnosticAssets
+    "pre-layernorm" -> mapOf(
+        "whisper_large_v3_turbo_30s_i4_decode_pre_layer_norm.tflite" to (
+            755_273_648L to
+                "5006280fc6a6b2be0d029bd411c7dd2348de7afda9b7c757d2210397e14afe01"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    "after-position-add" -> mapOf(
+        "whisper_large_v3_turbo_decode_shared_after_position_add.tflite" to (
+            755_273_920L to
+                "ee557aa9924a66f0b54f70c80759804b137e77dbaa9661d3b12bb5291615495d"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    "after-cross-attention" -> mapOf(
+        "whisper_large_v3_turbo_decode_shared_after_cross_attention.tflite" to (
+            755_273_928L to
+                "bf71f075f3dffee2d7d233fffc0d77559e624941424a24933830e94386df3f5a"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    "after-1-block" -> mapOf(
+        "whisper_large_v3_turbo_decode_shared_after_1_block.tflite" to (
+            755_273_920L to
+                "ed01a9e67f3a5991580bc7892ec9f747d63ed587bab02a6ef1b5c72366d4a6f3"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    "after-2-blocks" -> mapOf(
+        "whisper_large_v3_turbo_decode_shared_after_2_blocks.tflite" to (
+            755_273_920L to
+                "f5926743061104e49dd12f532fe3d35a3025f791bc1ec75c4e2a0b7eef136337"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    "after-3-blocks" -> mapOf(
+        "whisper_large_v3_turbo_decode_shared_after_3_blocks.tflite" to (
+            755_273_920L to
+                "9f4deb00a29115753cbdb0a663de08c34eec2079f9c15c5f98ebb314cbacb3ab"
+            ),
+        "whisper_large_v3_turbo_active_row_layer_norm_projection_i8.tflite" to (
+            67_023_504L to
+                "10ba23e2dc4e49e162d30f3e91d3b1c510f66d1e2cee63e5b7e4a3af37a4fe9a"
+            ),
+    )
+    else -> error("Unsupported decoder split diagnostic stage.")
+}
+
+val verifyDecoderSplitDiagnosticAssets by tasks.registering {
+    group = "verification"
+    description = "Verifies opt-in decoder-split models used only by device diagnostics."
+    onlyIf { includeDecoderSplitDiagnostics.get() }
+    inputs.property("decoderSplitDiagnosticStage", decoderSplitDiagnosticStage)
+    inputs.files(
+        selectedDecoderSplitDiagnosticAssets.keys.map(decoderSplitDiagnosticDirectory::file),
+    )
+
+    doLast {
+        check(selectedDecoderSplitDiagnosticAssets.isNotEmpty()) {
+            "No verified assets are registered for ${decoderSplitDiagnosticStage.get()}."
+        }
+        selectedDecoderSplitDiagnosticAssets.forEach { (fileName, expected) ->
+            val (expectedBytes, expectedSha256) = expected
+            val assetFile = decoderSplitDiagnosticDirectory.file(fileName).asFile
+            check(assetFile.isFile) {
+                """
+                Decoder-split diagnostic asset is missing:
+                 - ${assetFile.relativeTo(rootProject.projectDir)}
+
+                Run scripts/generate-whisper-decoder-split.sh generate, then rebuild
+                with -PincludeDecoderSplitDiagnostics=true.
+                """.trimIndent()
+            }
+            check(assetFile.length() == expectedBytes) {
+                "$fileName has ${assetFile.length()} bytes; expected $expectedBytes."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            assetFile.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualSha256 == expectedSha256) {
+                "$fileName SHA-256 is $actualSha256; expected $expectedSha256."
+            }
+        }
+    }
+}
+
+val prepareDecoderSplitDiagnosticAssets by tasks.registering {
+    onlyIf { includeDecoderSplitDiagnostics.get() }
+    dependsOn(verifyDecoderSplitDiagnosticAssets)
+    inputs.property("decoderSplitDiagnosticStage", decoderSplitDiagnosticStage)
+    inputs.files(
+        selectedDecoderSplitDiagnosticAssets.keys.map(decoderSplitDiagnosticDirectory::file),
+    )
+    outputs.dir(decoderSplitDiagnosticAssetRoot)
+
+    doLast {
+        val assetRoot = decoderSplitDiagnosticAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare decoder-split assets outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper-decoder-split")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        selectedDecoderSplitDiagnosticAssets.keys.forEach { fileName ->
+            val source = decoderSplitDiagnosticDirectory.file(fileName).asFile.toPath()
+            val destination = outputDirectory.resolve(fileName).toPath()
+            try {
+                Files.createLink(destination, source)
+            } catch (_: UnsupportedOperationException) {
+                Files.copy(source, destination)
+            } catch (_: java.nio.file.FileSystemException) {
+                Files.copy(source, destination)
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    if (includeDecoderSplitDiagnostics.get()) {
+        dependsOn(prepareDecoderSplitDiagnosticAssets)
+    }
+}
+
+val verifyRewrittenDecoderPrefixDiagnostic by tasks.registering {
+    group = "verification"
+    description = "Verifies the generated rewritten INT8 decoder-prefix diagnostic model."
+    onlyIf { includeRewrittenDecoderPrefixDiagnostic.get() }
+    inputs.file(rewrittenDecoderPrefixFile)
+    inputs.file(rewrittenDecoderSoftmaxProbeFile)
+    inputs.file(rewrittenDecoderMaskAddProbeFile)
+    inputs.file(rewrittenDecoderScoreProbeFile)
+    inputs.file(rewrittenDecoderValueProbeFile)
+    inputs.file(rewrittenDecoderKProjectionProbeFile)
+    inputs.property("rewrittenDecoderPrefixStage", rewrittenDecoderPrefixStage)
+    inputs.property("rewrittenDecoderPrefixSha256", rewrittenDecoderPrefixSha256)
+    inputs.property("rewrittenDecoderPrefixBytes", rewrittenDecoderPrefixBytes)
+
+    doLast {
+        val expectedSha256 = rewrittenDecoderPrefixSha256.get()
+        check(expectedSha256.matches(Regex("[0-9a-f]{64}"))) {
+            """
+            -PrewrittenDecoderPrefixSha256 must be the exact SHA-256 printed by
+            WhisperAttentionKeyTransposeTool generate-prefix.
+            """.trimIndent()
+        }
+        val assetFile = rewrittenDecoderPrefixFile.asFile
+        check(assetFile.isFile) {
+            """
+            Rewritten decoder-prefix diagnostic asset is missing:
+             - ${assetFile.relativeTo(rootProject.projectDir)}
+
+            Generate ${rewrittenDecoderPrefixStage.get()} with
+            WhisperAttentionKeyTransposeTool generate-prefix, then rebuild.
+            """.trimIndent()
+        }
+        val expectedBytes = rewrittenDecoderPrefixBytes.get()
+        check(assetFile.length() == expectedBytes) {
+            "decoder-prefix.tflite has ${assetFile.length()} bytes; expected $expectedBytes."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        assetFile.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        check(actualSha256 == expectedSha256) {
+            "decoder-prefix.tflite SHA-256 is $actualSha256; expected $expectedSha256."
+        }
+        val softmaxFile = rewrittenDecoderSoftmaxProbeFile.asFile
+        check(softmaxFile.isFile && softmaxFile.length() == 552L) {
+            "Generate the pinned isolated softmax probe before packaging diagnostics."
+        }
+        val softmaxDigest = MessageDigest.getInstance("SHA-256")
+        softmaxFile.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                softmaxDigest.update(buffer, 0, count)
+            }
+        }
+        val actualSoftmaxSha256 =
+            softmaxDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualSoftmaxSha256 == rewrittenDecoderSoftmaxProbeSha256) {
+            "softmax-probe.tflite SHA-256 is $actualSoftmaxSha256; " +
+                "expected $rewrittenDecoderSoftmaxProbeSha256."
+        }
+        val maskAddFile = rewrittenDecoderMaskAddProbeFile.asFile
+        check(maskAddFile.isFile && maskAddFile.length() == 664L) {
+            "Generate the pinned isolated causal-mask ADD probe before packaging diagnostics."
+        }
+        val maskAddDigest = MessageDigest.getInstance("SHA-256")
+        maskAddFile.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                maskAddDigest.update(buffer, 0, count)
+            }
+        }
+        val actualMaskAddSha256 =
+            maskAddDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualMaskAddSha256 == rewrittenDecoderMaskAddProbeSha256) {
+            "mask-add-probe.tflite SHA-256 is $actualMaskAddSha256; " +
+                "expected $rewrittenDecoderMaskAddProbeSha256."
+        }
+        val scoreFile = rewrittenDecoderScoreProbeFile.asFile
+        check(scoreFile.isFile && scoreFile.length() == 620L) {
+            "Generate the pinned isolated score-BMM probe before packaging diagnostics."
+        }
+        val scoreDigest = MessageDigest.getInstance("SHA-256")
+        scoreFile.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                scoreDigest.update(buffer, 0, count)
+            }
+        }
+        val actualScoreSha256 =
+            scoreDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualScoreSha256 == rewrittenDecoderScoreProbeSha256) {
+            "score-probe.tflite SHA-256 is $actualScoreSha256; " +
+                "expected $rewrittenDecoderScoreProbeSha256."
+        }
+        val valueFile = rewrittenDecoderValueProbeFile.asFile
+        check(valueFile.isFile && valueFile.length() == 664L) {
+            "Generate the pinned isolated attention-value BMM probe before packaging diagnostics."
+        }
+        val valueDigest = MessageDigest.getInstance("SHA-256")
+        valueFile.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                valueDigest.update(buffer, 0, count)
+            }
+        }
+        val actualValueSha256 =
+            valueDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualValueSha256 == rewrittenDecoderValueProbeSha256) {
+            "value-probe.tflite SHA-256 is $actualValueSha256; " +
+                "expected $rewrittenDecoderValueProbeSha256."
+        }
+        val kProjectionFile = rewrittenDecoderKProjectionProbeFile.asFile
+        check(kProjectionFile.isFile && kProjectionFile.length() == 1_654_640L) {
+            "Generate the pinned isolated K-projection probe before packaging diagnostics."
+        }
+        val kProjectionDigest = MessageDigest.getInstance("SHA-256")
+        kProjectionFile.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                kProjectionDigest.update(buffer, 0, count)
+            }
+        }
+        val actualKProjectionSha256 =
+            kProjectionDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualKProjectionSha256 == rewrittenDecoderKProjectionProbeSha256) {
+            "k-projection-probe.tflite SHA-256 is $actualKProjectionSha256; " +
+                "expected $rewrittenDecoderKProjectionProbeSha256."
+        }
+    }
+}
+
+val prepareRewrittenDecoderPrefixDiagnostic by tasks.registering {
+    onlyIf { includeRewrittenDecoderPrefixDiagnostic.get() }
+    dependsOn(verifyRewrittenDecoderPrefixDiagnostic)
+    inputs.file(rewrittenDecoderPrefixFile)
+    inputs.file(rewrittenDecoderSoftmaxProbeFile)
+    inputs.file(rewrittenDecoderMaskAddProbeFile)
+    inputs.file(rewrittenDecoderScoreProbeFile)
+    inputs.file(rewrittenDecoderValueProbeFile)
+    inputs.file(rewrittenDecoderKProjectionProbeFile)
+    inputs.property("rewrittenDecoderPrefixStage", rewrittenDecoderPrefixStage)
+    inputs.property("rewrittenDecoderPrefixSha256", rewrittenDecoderPrefixSha256)
+    inputs.property("rewrittenDecoderPrefixBytes", rewrittenDecoderPrefixBytes)
+    outputs.dir(rewrittenDecoderPrefixAssetRoot)
+
+    doLast {
+        val assetRoot = rewrittenDecoderPrefixAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare the decoder-prefix asset outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper-decoder-prefix")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        val destination = outputDirectory.resolve("decoder-prefix.tflite").toPath()
+        try {
+            Files.createLink(destination, rewrittenDecoderPrefixFile.asFile.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(rewrittenDecoderPrefixFile.asFile.toPath(), destination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(rewrittenDecoderPrefixFile.asFile.toPath(), destination)
+        }
+        val softmaxDestination = outputDirectory.resolve("softmax-probe.tflite").toPath()
+        try {
+            Files.createLink(
+                softmaxDestination,
+                rewrittenDecoderSoftmaxProbeFile.asFile.toPath(),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(rewrittenDecoderSoftmaxProbeFile.asFile.toPath(), softmaxDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(rewrittenDecoderSoftmaxProbeFile.asFile.toPath(), softmaxDestination)
+        }
+        val maskAddDestination = outputDirectory.resolve("mask-add-probe.tflite").toPath()
+        try {
+            Files.createLink(
+                maskAddDestination,
+                rewrittenDecoderMaskAddProbeFile.asFile.toPath(),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(rewrittenDecoderMaskAddProbeFile.asFile.toPath(), maskAddDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(rewrittenDecoderMaskAddProbeFile.asFile.toPath(), maskAddDestination)
+        }
+        val scoreDestination = outputDirectory.resolve("score-probe.tflite").toPath()
+        try {
+            Files.createLink(
+                scoreDestination,
+                rewrittenDecoderScoreProbeFile.asFile.toPath(),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(rewrittenDecoderScoreProbeFile.asFile.toPath(), scoreDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(rewrittenDecoderScoreProbeFile.asFile.toPath(), scoreDestination)
+        }
+        val kProjectionDestination =
+            outputDirectory.resolve("k-projection-probe.tflite").toPath()
+        val valueDestination = outputDirectory.resolve("value-probe.tflite").toPath()
+        try {
+            Files.createLink(
+                valueDestination,
+                rewrittenDecoderValueProbeFile.asFile.toPath(),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(rewrittenDecoderValueProbeFile.asFile.toPath(), valueDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(rewrittenDecoderValueProbeFile.asFile.toPath(), valueDestination)
+        }
+        try {
+            Files.createLink(
+                kProjectionDestination,
+                rewrittenDecoderKProjectionProbeFile.asFile.toPath(),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(
+                rewrittenDecoderKProjectionProbeFile.asFile.toPath(),
+                kProjectionDestination,
+            )
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(
+                rewrittenDecoderKProjectionProbeFile.asFile.toPath(),
+                kProjectionDestination,
+            )
+        }
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    if (includeRewrittenDecoderPrefixDiagnostic.get()) {
+        dependsOn(prepareRewrittenDecoderPrefixDiagnostic)
+    }
+}
+
+val verifyFullFloatDecoderDiagnostic by tasks.registering {
+    group = "verification"
+    description = "Verifies the fail-closed complete FLOAT32 decoder GPU model."
+    onlyIf {
+        includeFullFloatDecoderDiagnostic.get() ||
+            useFullFloatDecoderProduction.get()
+    }
+    inputs.file(fullFloatDecoderDiagnosticFile)
+    inputs.property("expectedBytes", fullFloatDecoderDiagnosticBytes)
+    inputs.property("expectedSha256", fullFloatDecoderDiagnosticSha256)
+
+    doLast {
+        val model = fullFloatDecoderDiagnosticFile.asFile
+        check(model.isFile) {
+            """
+            Complete FLOAT32 decoder diagnostic model is missing:
+             - ${model.relativeTo(rootProject.projectDir)}
+
+            Generate it with WhisperAttentionKeyTransposeTool
+            generate-full-float-decoder, then rebuild.
+            """.trimIndent()
+        }
+        check(model.length() == fullFloatDecoderDiagnosticBytes) {
+            "Full FLOAT32 decoder has ${model.length()} bytes; " +
+                "expected $fullFloatDecoderDiagnosticBytes."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        model.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val actual = digest.digest().joinToString("") { "%02x".format(it) }
+        check(actual == fullFloatDecoderDiagnosticSha256) {
+            "Full FLOAT32 decoder SHA-256 is $actual; " +
+                "expected $fullFloatDecoderDiagnosticSha256."
+        }
+    }
+}
+
+val prepareFullFloatDecoderProduction by tasks.registering {
+    onlyIf { useFullFloatDecoderProduction.get() }
+    dependsOn(verifyWhisperAssets, verifyFullFloatDecoderDiagnostic)
+    inputs.file(fullFloatDecoderDiagnosticFile)
+    inputs.files(
+        listOf(
+            "tokenizer.json",
+            "generation_config.json",
+            "preprocessor_config.json",
+        ).map(whisperAssetDirectory::file),
+    )
+    outputs.dir(fullFloatDecoderProductionAssetRoot)
+
+    doLast {
+        val assetRoot = fullFloatDecoderProductionAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare production GPU assets outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        val modelDestination =
+            outputDirectory.resolve("whisper_large_v3_turbo_full_float_decoder.tflite").toPath()
+        try {
+            Files.createLink(modelDestination, fullFloatDecoderDiagnosticFile.asFile.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(fullFloatDecoderDiagnosticFile.asFile.toPath(), modelDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(fullFloatDecoderDiagnosticFile.asFile.toPath(), modelDestination)
+        }
+        listOf(
+            "tokenizer.json",
+            "generation_config.json",
+            "preprocessor_config.json",
+        ).forEach { fileName ->
+            Files.copy(
+                whisperAssetDirectory.file(fileName).asFile.toPath(),
+                outputDirectory.resolve(fileName).toPath(),
+            )
+        }
+    }
+}
+
+tasks.matching {
+    it.name.startsWith("merge") &&
+        it.name.endsWith("Assets") &&
+        !it.name.contains("AndroidTest")
+}.configureEach {
+    if (useFullFloatDecoderProduction.get()) {
+        dependsOn(prepareFullFloatDecoderProduction)
+    }
+}
+
+// AGP's lint pipeline reads source-set assets directly instead of going
+// through the merge tasks above. Its task names include both lint... and
+// generate...Lint..., so wire every lint-related task to the asset producer.
+tasks.matching { it.name.contains("lint", ignoreCase = true) }.configureEach {
+    if (useFullFloatDecoderProduction.get()) {
+        dependsOn(prepareFullFloatDecoderProduction)
+    }
+}
+
+val prepareFullFloatDecoderDiagnostic by tasks.registering {
+    onlyIf { includeFullFloatDecoderDiagnostic.get() }
+    dependsOn(verifyFullFloatDecoderDiagnostic)
+    inputs.file(fullFloatDecoderDiagnosticFile)
+    outputs.dir(fullFloatDecoderDiagnosticAssetRoot)
+
+    doLast {
+        val assetRoot = fullFloatDecoderDiagnosticAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare the full decoder asset outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper-full-float-decoder")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        val destination = outputDirectory.resolve("decoder.tflite").toPath()
+        try {
+            Files.createLink(destination, fullFloatDecoderDiagnosticFile.asFile.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(fullFloatDecoderDiagnosticFile.asFile.toPath(), destination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(fullFloatDecoderDiagnosticFile.asFile.toPath(), destination)
+        }
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    if (includeFullFloatDecoderDiagnostic.get()) {
+        dependsOn(prepareFullFloatDecoderDiagnostic)
+    }
+}
+
+dependencies {
+    val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
+
+    implementation(composeBom)
+    androidTestImplementation(composeBom)
+
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.activity:activity-compose:1.12.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
+
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material3:material3:1.4.0")
+
+    implementation("androidx.room:room-runtime:2.8.4")
+    implementation("androidx.room:room-ktx:2.8.4")
+    kapt("androidx.room:room-compiler:2.8.4")
+
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    implementation("androidx.media3:media3-exoplayer:1.10.1")
+    implementation("androidx.media3:media3-session:1.10.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
+    if (useStrictMathGpuProbe.get()) {
+        // Diagnostic-only: a generated local copy changes one OpenCL compiler
+        // option byte in the arm64 accelerator. A file dependency has no POM,
+        // so retain LiteRT's public API explicitly.
+        implementation(files(strictMathGpuProbeAar))
+        implementation("com.google.ai.edge.litert:litert-api:2.1.6") {
+            exclude(group = "com.google.android.play", module = "ai-delivery")
+        }
+    } else {
+        implementation("com.google.ai.edge.litert:litert:2.1.6") {
+            // This app bundles its model. LiteRT's optional Play AI delivery
+            // integration would add Play Asset Delivery components and
+            // ACCESS_NETWORK_STATE even though the CPU Interpreter does not use
+            // them.
+            exclude(group = "com.google.android.play", module = "ai-delivery")
+        }
+    }
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testImplementation("androidx.room:room-testing:2.8.4")
+
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
+
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+}

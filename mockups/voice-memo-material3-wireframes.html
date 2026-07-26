@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoiceMemo Material 3 Pixel 7 Pro Wireframes</title>
+  <style>
+    :root {
+      --bg: #f8faf7;
+      --surface: #fffdf8;
+      --surface-low: #f3f0ea;
+      --surface-high: #ece6df;
+      --primary: #006b5f;
+      --on-primary: #ffffff;
+      --primary-container: #86f8e5;
+      --on-primary-container: #00201c;
+      --secondary-container: #d9e7df;
+      --tertiary-container: #d9e2ff;
+      --error-container: #ffdad6;
+      --outline: #737971;
+      --outline-variant: #c2c9c0;
+      --text: #191c1a;
+      --muted: #444942;
+      --shadow: 0 18px 50px rgba(29, 38, 34, 0.16);
+      color-scheme: light;
+      font-family: Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .sheet {
+      max-width: 1900px;
+      margin: 0 auto;
+      padding: 32px;
+    }
+
+    .sheet-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 28px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 28px;
+      line-height: 36px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 22px;
+      margin-top: 6px;
+    }
+
+    .device-note {
+      background: var(--secondary-container);
+      border-radius: 18px;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+      gap: 32px;
+      align-items: start;
+    }
+
+    .concept {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+    }
+
+    .caption {
+      width: 412px;
+    }
+
+    .caption h2 {
+      font-size: 18px;
+      line-height: 26px;
+      font-weight: 600;
+    }
+
+    .caption p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 19px;
+      margin-top: 3px;
+    }
+
+    .phone {
+      width: 412px;
+      height: 892px;
+      border: 12px solid #171a18;
+      border-radius: 42px;
+      background: var(--surface);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      position: relative;
+    }
+
+    .phone::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 86px;
+      height: 25px;
+      background: #171a18;
+      border-radius: 999px;
+      z-index: 3;
+    }
+
+    .screen {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+    }
+
+    .status {
+      height: 38px;
+      padding: 11px 24px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .appbar {
+      min-height: 74px;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 20px 14px;
+    }
+
+    .appbar h3 {
+      font-size: 25px;
+      line-height: 32px;
+      font-weight: 600;
+    }
+
+    .icon-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .icon-button {
+      width: 42px;
+      height: 42px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: var(--surface-low);
+      color: var(--muted);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .content {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      padding: 0 20px 20px;
+    }
+
+    .nav {
+      height: 74px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      align-items: center;
+      background: var(--surface-high);
+      padding: 8px 12px 12px;
+    }
+
+    .nav-item {
+      display: grid;
+      justify-items: center;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .nav-icon {
+      min-width: 54px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+    }
+
+    .nav-item.active .nav-icon {
+      background: var(--secondary-container);
+      color: var(--on-primary-container);
+    }
+
+    .search {
+      height: 54px;
+      border-radius: 28px;
+      background: var(--surface-high);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .chip {
+      border: 1px solid var(--outline-variant);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--surface);
+      line-height: 14px;
+    }
+
+    .chip.filled {
+      border-color: transparent;
+      background: var(--secondary-container);
+      color: var(--on-primary-container);
+      font-weight: 600;
+    }
+
+    .card {
+      background: var(--surface-low);
+      border-radius: 24px;
+      padding: 16px;
+      margin-bottom: 12px;
+      border: 1px solid transparent;
+    }
+
+    .card.outlined {
+      background: var(--surface);
+      border-color: var(--outline-variant);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .title {
+      font-size: 17px;
+      line-height: 23px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 18px;
+      margin-top: 2px;
+    }
+
+    .quote,
+    .summary {
+      color: #2c312e;
+      font-size: 13px;
+      line-height: 20px;
+      margin-top: 8px;
+    }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 10px;
+      background: var(--secondary-container);
+      color: var(--on-primary-container);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .state.error {
+      background: var(--error-container);
+    }
+
+    .progress {
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #d8ded6;
+      margin-top: 12px;
+    }
+
+    .progress > span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--primary);
+    }
+
+    .timeline {
+      display: grid;
+      gap: 10px;
+      margin: 10px 0 14px;
+    }
+
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .step .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: var(--secondary-container);
+      color: var(--on-primary-container);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .wave {
+      height: 50px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin: 10px 0 14px;
+    }
+
+    .bar {
+      width: 6px;
+      border-radius: 999px;
+      background: var(--primary);
+      opacity: 0.78;
+    }
+
+    .semantic-card {
+      border-radius: 28px;
+      background: var(--surface-high);
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+
+    .query {
+      display: flex;
+      justify-content: space-between;
+      padding: 13px 0;
+      border-bottom: 1px solid var(--outline-variant);
+      font-size: 14px;
+    }
+
+    .query:last-child {
+      border-bottom: 0;
+    }
+
+    .metadata-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .metadata-pill {
+      border-radius: 16px;
+      background: var(--surface);
+      padding: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 52px;
+    }
+
+    .metadata-pill strong {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 2px;
+    }
+
+    .select-bar {
+      height: 58px;
+      margin: 0 -20px 14px;
+      padding: 0 20px;
+      background: var(--primary-container);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--on-primary-container);
+      font-weight: 650;
+    }
+
+    .checkbox {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      border: 2px solid var(--primary);
+      display: grid;
+      place-items: center;
+      color: var(--on-primary);
+      background: var(--primary);
+      font-size: 14px;
+      flex: 0 0 auto;
+    }
+
+    .batch-actions {
+      height: 84px;
+      background: var(--surface-high);
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+      padding: 10px 10px 12px;
+    }
+
+    .action {
+      display: grid;
+      justify-items: center;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .action .round {
+      width: 42px;
+      height: 36px;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      background: var(--secondary-container);
+      color: var(--on-primary-container);
+      font-size: 15px;
+    }
+
+    .swipe-stage {
+      position: relative;
+      height: 142px;
+      margin-bottom: 12px;
+      border-radius: 24px;
+      overflow: hidden;
+      background: linear-gradient(90deg, #d7e2ff 0 32%, #ffdad6 68% 100%);
+    }
+
+    .swipe-actions {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 20px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .swiped-card {
+      position: absolute;
+      width: 292px;
+      left: 62px;
+      top: 11px;
+      margin: 0;
+      box-shadow: 0 6px 24px rgba(29, 38, 34, 0.16);
+    }
+
+    .folder-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .folder {
+      background: var(--surface-low);
+      border-radius: 24px;
+      padding: 16px;
+      min-height: 118px;
+      display: grid;
+      align-content: space-between;
+      border: 1px solid var(--outline-variant);
+    }
+
+    .folder strong {
+      font-size: 16px;
+    }
+
+    .folder span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .fab {
+      position: absolute;
+      right: 22px;
+      bottom: 92px;
+      min-width: 86px;
+      height: 56px;
+      padding: 0 18px;
+      border-radius: 18px;
+      background: var(--primary-container);
+      color: var(--on-primary-container);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      box-shadow: 0 8px 24px rgba(0, 61, 54, 0.18);
+    }
+
+    .section-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--muted);
+      margin: 4px 0 10px;
+    }
+
+    @media (max-width: 520px) {
+      .sheet {
+        padding: 18px 10px;
+      }
+
+      .sheet-header {
+        display: block;
+      }
+
+      .device-note {
+        margin-top: 12px;
+        display: inline-block;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .phone,
+      .caption {
+        width: min(412px, calc(100vw - 24px));
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header class="sheet-header">
+      <div>
+        <h1>VoiceMemo Material 3 Wireframes</h1>
+        <p class="subtitle">Eight UX directions rendered as Android Pixel 7 Pro screens. These are low-fidelity but use Material 3 surfaces, chips, app bars, cards, navigation, and 8dp spacing.</p>
+      </div>
+      <div class="device-note">Target: Pixel 7 Pro, 412 x 892 CSS px</div>
+    </header>
+
+    <section class="grid">
+      <article class="concept">
+        <div class="caption">
+          <h2>1. Human Titles Over Timestamps</h2>
+          <p>Generated titles, useful snippets, and status replace timestamp-only cards.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Library</h3>
+              <div class="icon-row"><div class="icon-button">S</div><div class="icon-button">+</div></div>
+            </div>
+            <div class="content">
+              <div class="search">Search recordings and transcripts</div>
+              <div class="chip-row">
+                <span class="chip filled">Recent</span><span class="chip">Meetings</span><span class="chip">Ideas</span>
+              </div>
+              <div class="card">
+                <div class="card-header">
+                  <div>
+                    <div class="title">Meeting with Jan</div>
+                    <div class="meta">2 min - Yesterday - English</div>
+                  </div>
+                  <span class="state">Ready</span>
+                </div>
+                <p class="quote">"Let's move the release to October and keep the Android beta narrow..."</p>
+              </div>
+              <div class="card">
+                <div class="card-header">
+                  <div>
+                    <div class="title">AI Idea</div>
+                    <div class="meta">18 sec - Today - English</div>
+                  </div>
+                  <span class="state">Ready</span>
+                </div>
+                <p class="quote">Need to try local diarisation with WhisperKit and compare labels.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header">
+                  <div>
+                    <div class="title">Shopping List</div>
+                    <div class="meta">41 sec - Mon - German</div>
+                  </div>
+                  <span class="state">Ready</span>
+                </div>
+                <p class="quote">Milk, tomatoes, coffee filters, batteries, and the garden hose adapter.</p>
+              </div>
+            </div>
+            <div class="fab">Rec</div>
+            <nav class="nav">
+              <div class="nav-item active"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>2. Progressive Content Reveal</h2>
+          <p>Processing becomes readable: recording, transcription, summary, then key points.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Current memo</h3>
+              <div class="icon-button">X</div>
+            </div>
+            <div class="content">
+              <div class="card">
+                <div class="card-header">
+                  <div>
+                    <div class="title">Recording in progress</div>
+                    <div class="meta">00:42 - Local transcription queued</div>
+                  </div>
+                  <span class="state">Live</span>
+                </div>
+                <div class="wave">
+                  <span class="bar" style="height:18px"></span><span class="bar" style="height:34px"></span><span class="bar" style="height:24px"></span><span class="bar" style="height:46px"></span><span class="bar" style="height:28px"></span><span class="bar" style="height:40px"></span><span class="bar" style="height:22px"></span><span class="bar" style="height:36px"></span><span class="bar" style="height:48px"></span><span class="bar" style="height:26px"></span><span class="bar" style="height:38px"></span><span class="bar" style="height:18px"></span><span class="bar" style="height:30px"></span><span class="bar" style="height:44px"></span><span class="bar" style="height:20px"></span><span class="bar" style="height:36px"></span><span class="bar" style="height:28px"></span><span class="bar" style="height:42px"></span>
+                </div>
+              </div>
+              <div class="semantic-card">
+                <div class="timeline">
+                  <div class="step"><span class="dot">1</span><span>Recording audio</span></div>
+                  <div class="step"><span class="dot">2</span><span>Saving locally</span></div>
+                  <div class="step"><span class="dot">3</span><span>Transcribing first chunk</span></div>
+                  <div class="step"><span class="dot">4</span><span>Summarising when ready</span></div>
+                </div>
+                <div class="progress"><span style="width:58%"></span></div>
+              </div>
+              <div class="card outlined">
+                <div class="title">Summary preview</div>
+                <p class="summary">Discussed October release timing, speaker diarisation, and a new local model benchmark.</p>
+              </div>
+              <div class="card outlined">
+                <div class="section-label">Discussed</div>
+                <p class="summary">- UX redesign<br>- Speaker diarisation<br>- New model<br>- Android beta</p>
+              </div>
+            </div>
+            <nav class="nav">
+              <div class="nav-item"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item active"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>3. Better Recording States</h2>
+          <p>Explicit state labels make local transcription outcomes and next actions clear.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Processing</h3>
+              <div class="icon-button">?</div>
+            </div>
+            <div class="content">
+              <div class="card">
+                <div class="card-header"><div><div class="title">Product Meeting</div><div class="meta">15 min - German</div></div><span class="state">Transcribing 35%</span></div>
+                <div class="progress"><span style="width:35%"></span></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div><div class="title">Design Critique</div><div class="meta">8 min - Today</div></div><span class="state">Generating summary</span></div>
+                <div class="progress"><span style="width:82%"></span></div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Driving Note</div><div class="meta">26 sec - Waiting for model</div></div><span class="state">Queued</span></div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Client Call</div><div class="meta">Needs cloud summary model</div></div><span class="state error">Needs internet</span></div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Broken Import</div><div class="meta">Unsupported media codec</div></div><span class="state error">Error</span></div>
+              </div>
+            </div>
+            <nav class="nav">
+              <div class="nav-item active"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>4. Smarter Semantic Search</h2>
+          <p>Search accepts natural phrases and exposes filters for people, topics, dates, and tags.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Search</h3>
+              <div class="icon-button">X</div>
+            </div>
+            <div class="content">
+              <div class="search">that idea I had yesterday</div>
+              <div class="chip-row">
+                <span class="chip filled">Semantic</span><span class="chip">People</span><span class="chip">Topics</span><span class="chip">Projects</span><span class="chip">Date</span><span class="chip">Tags</span>
+              </div>
+              <div class="semantic-card">
+                <div class="section-label">Try searching</div>
+                <div class="query"><span>garden</span><span>4</span></div>
+                <div class="query"><span>meeting about AI</span><span>7</span></div>
+                <div class="query"><span>voice note mentioning Elena</span><span>2</span></div>
+                <div class="query"><span>everything with shopping</span><span>5</span></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div><div class="title">AI Idea</div><div class="meta">Best semantic match - Yesterday</div></div><span class="state">92%</span></div>
+                <p class="quote">Need to try local diarisation with WhisperKit and compare labels.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Garden Sensor Note</div><div class="meta">Topic: Home automation</div></div><span class="state">78%</span></div>
+              </div>
+            </div>
+            <nav class="nav">
+              <div class="nav-item active"><div class="nav-icon">S</div><span>Search</span></div>
+              <div class="nav-item"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>5. Metadata-Rich Cards</h2>
+          <p>Cards carry duration, speakers, language, location, and summary without feeling empty.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Recordings</h3>
+              <div class="icon-row"><div class="icon-button">F</div><div class="icon-button">+</div></div>
+            </div>
+            <div class="content">
+              <div class="card">
+                <div class="card-header">
+                  <div><div class="title">Product Meeting</div><div class="meta">AI Summary ready</div></div>
+                  <span class="state">Pinned</span>
+                </div>
+                <div class="metadata-grid">
+                  <div class="metadata-pill"><strong>15 min</strong>Duration</div>
+                  <div class="metadata-pill"><strong>3 speakers</strong>Detected</div>
+                  <div class="metadata-pill"><strong>German</strong>Language</div>
+                  <div class="metadata-pill"><strong>Berlin Office</strong>Location</div>
+                </div>
+                <p class="summary">Discussed October release, backend scaling, and follow-up tasks for Android transcription.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">University Lecture</div><div class="meta">54 min - 1 speaker - English</div></div><span class="state">Ready</span></div>
+                <p class="quote">Key topics: retrieval, embeddings, vector search, and evaluation.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Personal Reminder</div><div class="meta">31 sec - Private - Home</div></div><span class="state">Ready</span></div>
+              </div>
+            </div>
+            <nav class="nav">
+              <div class="nav-item active"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>6. Batch Operations</h2>
+          <p>Long-press selection unlocks delete, merge, export, share, tags, and folder movement.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Library</h3>
+              <div class="icon-button">X</div>
+            </div>
+            <div class="content">
+              <div class="select-bar"><span>3 selected</span><span>Select all</span></div>
+              <div class="card">
+                <div class="card-header">
+                  <div class="checkbox">✓</div>
+                  <div style="flex:1"><div class="title">Product Meeting</div><div class="meta">15 min - Work</div></div>
+                  <span class="state">Ready</span>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-header">
+                  <div class="checkbox">✓</div>
+                  <div style="flex:1"><div class="title">Design Critique</div><div class="meta">8 min - Work</div></div>
+                  <span class="state">Ready</span>
+                </div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header">
+                  <div class="checkbox">✓</div>
+                  <div style="flex:1"><div class="title">AI Idea</div><div class="meta">18 sec - Ideas</div></div>
+                  <span class="state">Ready</span>
+                </div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header">
+                  <div class="checkbox" style="background:transparent;color:transparent"></div>
+                  <div style="flex:1"><div class="title">Shopping List</div><div class="meta">41 sec - Personal</div></div>
+                </div>
+              </div>
+            </div>
+            <div class="batch-actions">
+              <div class="action"><div class="round">D</div><span>Delete</span></div>
+              <div class="action"><div class="round">M</div><span>Merge</span></div>
+              <div class="action"><div class="round">E</div><span>Export</span></div>
+              <div class="action"><div class="round">S</div><span>Share</span></div>
+              <div class="action"><div class="round">T</div><span>Tags</span></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>7. Swipe Actions</h2>
+          <p>Horizontal card gestures expose fast transcript, summarize, export, archive, pin, and delete paths.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Library</h3>
+              <div class="icon-button">?</div>
+            </div>
+            <div class="content">
+              <div class="swipe-stage">
+                <div class="swipe-actions"><span>Transcript<br>Summary<br>Export</span><span>Pin<br>Archive<br>Delete</span></div>
+                <div class="card swiped-card">
+                  <div class="card-header"><div><div class="title">Product Meeting</div><div class="meta">15 min - Ready</div></div></div>
+                  <p class="quote">Discussed October release and backend scaling.</p>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div><div class="title">Swipe right</div><div class="meta">For content actions</div></div><span class="state">Transcript</span></div>
+                <p class="summary">Open transcript, summarize again, export audio or text.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Swipe left</div><div class="meta">For library actions</div></div><span class="state">Delete</span></div>
+                <p class="summary">Delete, archive, favorite, pin, rename, or share.</p>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Undo snackbar</div><div class="meta">Appears after destructive actions</div></div><span class="state">Undo</span></div>
+              </div>
+            </div>
+            <nav class="nav">
+              <div class="nav-item active"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept">
+        <div class="caption">
+          <h2>8. Recording Organization</h2>
+          <p>Folders, projects, pinned items, favorites, tags, and automatic groups tame large libraries.</p>
+        </div>
+        <div class="phone">
+          <div class="screen">
+            <div class="status"><span>9:41</span><span>5G 88%</span></div>
+            <div class="appbar">
+              <h3>Projects</h3>
+              <div class="icon-row"><div class="icon-button">F</div><div class="icon-button">+</div></div>
+            </div>
+            <div class="content">
+              <div class="chip-row">
+                <span class="chip filled">All</span><span class="chip">Pinned</span><span class="chip">Favorites</span><span class="chip">Tags</span>
+              </div>
+              <div class="folder-grid">
+                <div class="folder"><strong>Work</strong><span>142 recordings<br>12 people</span></div>
+                <div class="folder"><strong>Personal</strong><span>84 recordings<br>9 tags</span></div>
+                <div class="folder"><strong>Ideas</strong><span>37 recordings<br>Auto grouped</span></div>
+                <div class="folder"><strong>University</strong><span>26 recordings<br>4 courses</span></div>
+              </div>
+              <div class="section-label">Automatic groups</div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">October Release</div><div class="meta">17 related memos - Work</div></div><span class="state">Topic</span></div>
+              </div>
+              <div class="card outlined">
+                <div class="card-header"><div><div class="title">Garden</div><div class="meta">8 related memos - Personal</div></div><span class="state">Tag</span></div>
+              </div>
+            </div>
+            <div class="fab">New</div>
+            <nav class="nav">
+              <div class="nav-item"><div class="nav-icon">L</div><span>Library</span></div>
+              <div class="nav-item"><div class="nav-icon">R</div><span>Record</span></div>
+              <div class="nav-item active"><div class="nav-icon">P</div><span>Projects</span></div>
+            </nav>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

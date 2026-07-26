@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- VoiceMemo: a speech bubble meeting an audio waveform. -->
+    <path
+        android:fillColor="#082454"
+        android:pathData="M24,2 A22,22 0,1 1,24,46 A22,22 0,1 1,24,2" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,11 C7.7,11 5,13.7 5,17 L5,27 C5,30.3 7.7,33 11,33 L14.3,33 L11,38 L20.3,33 L30,33 C33.3,33 36,30.3 36,27 L36,17 C36,13.7 33.3,11 30,11 Z" />
+    <path
+        android:fillColor="#12B8E8"
+        android:pathData="M10,23 C10,21.9 10.9,21 12,21 C13.1,21 14,21.9 14,23 L14,26 C14,27.1 13.1,28 12,28 C10.9,28 10,27.1 10,26 Z M16,19 C16,17.9 16.9,17 18,17 C19.1,17 20,17.9 20,19 L20,30 C20,31.1 19.1,32 18,32 C16.9,32 16,31.1 16,30 Z M22,15 C22,13.9 22.9,13 24,13 C25.1,13 26,13.9 26,15 L26,30 C26,31.1 25.1,32 24,32 C22.9,32 22,31.1 22,30 Z M28,19 C28,17.9 28.9,17 30,17 C31.1,17 32,17.9 32,19 L32,26 C32,27.1 31.1,28 30,28 C28.9,28 28,27.1 28,26 Z" />
+</vector>

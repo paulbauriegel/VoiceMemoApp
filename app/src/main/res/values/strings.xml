@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Voice Memo</string>
+    <string name="recording_channel_name">Voice recording</string>
+    <string name="recording_channel_description">Shows recording controls while Voice Memo is using the microphone</string>
+    <string name="transcription_channel_name">Local transcription</string>
+    <string name="transcription_channel_description">Shows progress while Voice Memo transcribes audio on this device</string>
+</resources>

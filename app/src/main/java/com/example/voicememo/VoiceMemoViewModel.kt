@@ -1,0 +1,1257 @@
+package com.example.voicememo
+
+import android.app.ActivityManager
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import androidx.core.net.toUri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.voicememo.data.MemoDetail
+import com.example.voicememo.data.MemoLibrarySearchResult
+import com.example.voicememo.data.MemoSummary
+import com.example.voicememo.data.TranscriptionJob
+import com.example.voicememo.data.TranscriptionJobStatus
+import com.example.voicememo.data.TranscriptChunk
+import com.example.voicememo.data.TranscriptSource
+import com.example.voicememo.playback.PlaybackState
+import com.example.voicememo.recording.RecordingState
+import com.example.voicememo.recording.WaveformBucket
+import com.example.voicememo.recording.WaveformSidecar
+import com.example.voicememo.sharing.ShareContent
+import com.example.voicememo.sharing.ShareableMemo
+import com.example.voicememo.ui.DetailSection
+import com.example.voicememo.ui.LicenseUi
+import com.example.voicememo.ui.ModelAvailabilityPhase
+import com.example.voicememo.ui.ModelAvailabilityUiState
+import com.example.voicememo.ui.PendingDeleteUi
+import com.example.voicememo.ui.PendingShareUi
+import com.example.voicememo.ui.RecorderPhase
+import com.example.voicememo.ui.RecorderUiState
+import com.example.voicememo.ui.SharePayload
+import com.example.voicememo.ui.TranscriptSegmentUi
+import com.example.voicememo.ui.TranscriptDetailUi
+import com.example.voicememo.ui.TranscriptionPhase
+import com.example.voicememo.ui.TranscriptionSummaryUi
+import com.example.voicememo.ui.VoiceMemoAppUiState
+import com.example.voicememo.ui.VoiceMemoDestination
+import com.example.voicememo.ui.VoiceMemoDetailUi
+import com.example.voicememo.ui.VoiceMemoListItemUi
+import com.example.voicememo.ui.VoiceMemoUiAction
+import com.example.voicememo.transcription.SileroVoiceActivityDetector
+import com.example.voicememo.transcription.WhisperAssets
+import com.example.voicememo.transcription.WhisperTimestampTokens
+import com.example.voicememo.transcription.WhisperTokenizer
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+sealed interface VoiceMemoUiEffect {
+    data object LaunchAudioPicker : VoiceMemoUiEffect
+    data class LaunchBackupExport(val suggestedFileName: String) : VoiceMemoUiEffect
+    data object LaunchBackupRestore : VoiceMemoUiEffect
+    data class LaunchIntent(val intent: Intent) : VoiceMemoUiEffect
+    data class Message(val text: String) : VoiceMemoUiEffect
+}
+
+class VoiceMemoViewModel(
+    application: Application,
+) : AndroidViewModel(application) {
+    private val container = (application as VoiceMemoApplication).container
+    private val repository = container.memoRepository
+    private val presentation = MutableStateFlow(
+        PresentationState(
+            transcriptionTimestampsEnabled =
+                container.transcriptionPreferences.timestampsEnabled,
+            voiceActivityDetectionEnabled =
+                container.transcriptionPreferences.voiceActivityDetectionEnabled,
+            gpuAccelerationEnabled =
+                container.transcriptionPreferences.gpuAccelerationEnabled,
+        ),
+    )
+    private val waveformCache = ConcurrentHashMap<WaveformCacheKey, List<Float>>()
+    private val mutableEffects = MutableSharedFlow<VoiceMemoUiEffect>(extraBufferCapacity = 8)
+    val effects = mutableEffects.asSharedFlow()
+    private val licenseItems: List<LicenseUi> by lazy {
+        val resources = getApplication<Application>().resources
+        listOf(
+            LicenseUi(
+                name = "OpenAI Whisper",
+                version = WhisperAssets.MODEL_REVISION.take(8),
+                licenseName = "MIT License",
+                notice = resources.openRawResource(R.raw.openai_whisper_mit)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://huggingface.co/litert-community/whisper-large-v3-turbo",
+            ),
+            LicenseUi(
+                name = "Google LiteRT",
+                version = "2.1.6",
+                licenseName = "Apache License 2.0",
+                notice = resources.openRawResource(R.raw.litert_apache_2_0)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://ai.google.dev/edge/litert",
+            ),
+            LicenseUi(
+                name = "Silero VAD",
+                version = SileroVoiceActivityDetector.MODEL_VERSION,
+                licenseName = "MIT License",
+                notice = resources.openRawResource(R.raw.silero_vad_mit)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://github.com/snakers4/silero-vad",
+            ),
+            LicenseUi(
+                name = "Microsoft ONNX Runtime",
+                version = "1.26.0",
+                licenseName = "MIT License",
+                notice = resources.openRawResource(R.raw.onnx_runtime_mit)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://github.com/microsoft/onnxruntime",
+            ),
+        )
+    }
+    private val transcriptTokenizer: WhisperTokenizer by lazy {
+        getApplication<Application>().assets.open(WhisperAssets.TOKENIZER).use {
+            WhisperTokenizer.load(it)
+        }
+    }
+
+    private val searchQueries = presentation
+        .map { it.query }
+        .distinctUntilChanged()
+        .mapLatest { query ->
+            if (query.isNotBlank()) delay(120L)
+            query
+        }
+
+    private val library: Flow<MemoLibrarySearchResult> = repository
+        .observeLibraryQueries(searchQueries)
+        .mapLatest { result ->
+            withContext(Dispatchers.IO) {
+                result.memos.forEach { memo ->
+                    memo.waveformPath?.let {
+                        cachedWaveform(
+                            path = it,
+                            maximumBuckets = LIBRARY_WAVEFORM_BUCKETS,
+                            generation = memo.updatedAtMillis,
+                        )
+                    }
+                }
+            }
+            result
+        }
+
+    private val detail: Flow<MemoDetail?> = presentation
+        .map { it.selectedMemoId }
+        .distinctUntilChanged()
+        .flatMapLatest { memoId ->
+            if (memoId == null) flowOf(null) else repository.observeMemo(memoId)
+        }
+        .mapLatest { memo ->
+            withContext(Dispatchers.IO) {
+                memo?.memo?.waveformPath?.let {
+                    cachedWaveform(
+                        path = it,
+                        maximumBuckets = DETAIL_WAVEFORM_BUCKETS,
+                        generation = memo.memo.updatedAtMillis,
+                    )
+                }
+            }
+            memo
+        }
+
+    val uiState: StateFlow<VoiceMemoAppUiState> = combine(
+        library,
+        detail,
+        container.recorderController.state,
+        container.memoPlayer.state,
+        presentation,
+    ) { searchResult, memoDetail, recorder, playback, local ->
+        val memos = searchResult.memos.takeIf {
+            searchResult.query == local.query
+        }.orEmpty()
+        val visibleMemoIds = memos.mapTo(hashSetOf(), MemoSummary::id)
+        VoiceMemoAppUiState(
+            destination = local.destination,
+            query = local.query,
+            memos = memos.map { it.toUi(playback) },
+            selectedMemoIds = local.selectedMemoIds.intersect(visibleMemoIds),
+            selectedMemoId = local.selectedMemoId,
+            isImportingAudio = local.isImportingAudio || local.isAudioPickerOpen,
+            isExportingBackup = local.isExportingBackup || local.isBackupExportPickerOpen,
+            isRestoringBackup = local.isRestoringBackup || local.isBackupRestorePickerOpen,
+            showRestoreBackupConfirmation = local.showRestoreBackupConfirmation,
+            transcriptionTimestampsEnabled = local.transcriptionTimestampsEnabled,
+            voiceActivityDetectionEnabled = local.voiceActivityDetectionEnabled,
+            gpuAccelerationEnabled = local.gpuAccelerationEnabled,
+            recorder = recorder.toUi(),
+            detail = memoDetail?.toUi(playback, local),
+            modelAvailability = modelAvailability(),
+            pendingDelete = local.pendingDelete,
+            pendingShare = local.pendingShare,
+            licenses = licenseItems,
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000L),
+        initialValue = VoiceMemoAppUiState(
+            modelAvailability = modelAvailability(),
+            licenses = licenseItems,
+            transcriptionTimestampsEnabled =
+                container.transcriptionPreferences.timestampsEnabled,
+            voiceActivityDetectionEnabled =
+                container.transcriptionPreferences.voiceActivityDetectionEnabled,
+            gpuAccelerationEnabled =
+                container.transcriptionPreferences.gpuAccelerationEnabled,
+        ),
+    )
+
+    init {
+        viewModelScope.launch {
+            container.recorderController.state.collect { state ->
+                if (state is RecordingState.Completed) {
+                    presentation.update {
+                        it.copy(
+                            destination = VoiceMemoDestination.Library,
+                            selectedMemoIds = emptySet(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun onAction(action: VoiceMemoUiAction) {
+        when (action) {
+            VoiceMemoUiAction.ImportAudio -> {
+                val current = presentation.value
+                if (current.isBackupBusy()) {
+                    mutableEffects.tryEmit(
+                        VoiceMemoUiEffect.Message(
+                            "Wait for the backup operation to finish before importing audio.",
+                        ),
+                    )
+                } else if (!current.isImportingAudio && !current.isAudioPickerOpen) {
+                    presentation.update { it.copy(isAudioPickerOpen = true) }
+                    if (!mutableEffects.tryEmit(VoiceMemoUiEffect.LaunchAudioPicker)) {
+                        presentation.update { it.copy(isAudioPickerOpen = false) }
+                    }
+                }
+            }
+
+            VoiceMemoUiAction.ExportBackup -> requestBackupExport()
+
+            VoiceMemoUiAction.RequestRestoreBackup -> {
+                if (canStartBackupOperation()) {
+                    presentation.update { it.copy(showRestoreBackupConfirmation = true) }
+                }
+            }
+
+            VoiceMemoUiAction.ConfirmRestoreBackup -> requestBackupRestore()
+
+            VoiceMemoUiAction.DismissRestoreBackup -> presentation.update {
+                it.copy(showRestoreBackupConfirmation = false)
+            }
+
+            is VoiceMemoUiAction.SearchChanged ->
+                presentation.update { local ->
+                    if (local.query == action.query) {
+                        local
+                    } else {
+                        local.copy(
+                            query = action.query,
+                            selectedMemoIds = emptySet(),
+                        )
+                    }
+                }
+
+            VoiceMemoUiAction.StartRecording -> {
+                if (
+                    presentation.value.isImportingAudio ||
+                    presentation.value.isAudioPickerOpen ||
+                    presentation.value.isBackupBusy()
+                ) {
+                    mutableEffects.tryEmit(
+                        VoiceMemoUiEffect.Message(
+                            "Wait for the current file operation to finish before recording.",
+                        ),
+                    )
+                    return
+                }
+                presentation.update {
+                    it.copy(
+                        destination = VoiceMemoDestination.Recorder,
+                        selectedMemoIds = emptySet(),
+                    )
+                }
+                val state = container.recorderController.state.value
+                if (
+                    state is RecordingState.Idle ||
+                    state is RecordingState.Completed ||
+                    state is RecordingState.Failed
+                ) {
+                    container.memoPlayer.stop()
+                    container.recorderController.start()
+                }
+            }
+
+            VoiceMemoUiAction.PauseRecording -> container.recorderController.pause()
+            VoiceMemoUiAction.ResumeRecording -> container.recorderController.resume()
+            VoiceMemoUiAction.StopRecording -> container.recorderController.stop()
+
+            is VoiceMemoUiAction.OpenMemo -> presentation.update {
+                it.copy(
+                    destination = VoiceMemoDestination.Detail,
+                    selectedMemoId = action.memoId,
+                    selectedMemoIds = emptySet(),
+                    titleDraft = null,
+                    titleEditing = false,
+                    transcriptDraft = null,
+                    transcriptEditing = false,
+                )
+            }
+
+            is VoiceMemoUiAction.ToggleMemoPlayback -> {
+                viewModelScope.launch {
+                    repository.getMemo(action.memoId)?.let { memo ->
+                        container.memoPlayer.playOrPause(memo.id, memo.audioPath)
+                    }
+                }
+            }
+
+            is VoiceMemoUiAction.ToggleMemoSelection -> {
+                val visibleMemoIds = uiState.value.memos.mapTo(hashSetOf()) { it.id }
+                if (action.memoId in visibleMemoIds) {
+                    presentation.update { local ->
+                        val selected = local.selectedMemoIds.toMutableSet().apply {
+                            if (!add(action.memoId)) remove(action.memoId)
+                        }
+                        local.copy(selectedMemoIds = selected)
+                    }
+                }
+            }
+
+            VoiceMemoUiAction.ClearSelection ->
+                presentation.update { it.copy(selectedMemoIds = emptySet()) }
+
+            VoiceMemoUiAction.SelectAll -> {
+                val visibleMemoIds = uiState.value.memos
+                    .mapTo(linkedSetOf()) { it.id }
+                presentation.update { it.copy(selectedMemoIds = visibleMemoIds) }
+            }
+
+            is VoiceMemoUiAction.RequestDelete -> {
+                val visibleMemoIds = uiState.value.memos.mapTo(hashSetOf()) { it.id }
+                val safeIds = action.memoIds.intersect(visibleMemoIds)
+                if (safeIds.isNotEmpty()) {
+                    presentation.update {
+                        it.copy(pendingDelete = PendingDeleteUi(safeIds))
+                    }
+                }
+            }
+
+            VoiceMemoUiAction.ConfirmDelete -> confirmDelete()
+            VoiceMemoUiAction.DismissDelete ->
+                presentation.update { it.copy(pendingDelete = null) }
+
+            is VoiceMemoUiAction.RequestShare -> {
+                val selected = uiState.value.memos.filter { it.id in action.memoIds }
+                if (selected.isNotEmpty()) {
+                    presentation.update {
+                        it.copy(
+                            pendingShare = PendingShareUi(
+                                memoIds = selected.mapTo(linkedSetOf()) { memo -> memo.id },
+                                transcriptAvailableForAll = selected.all { memo ->
+                                    !memo.transcriptPreview.isNullOrBlank()
+                                },
+                            ),
+                        )
+                    }
+                }
+            }
+
+            is VoiceMemoUiAction.ShareAs -> share(action.payload)
+            VoiceMemoUiAction.DismissShare ->
+                presentation.update { it.copy(pendingShare = null) }
+
+            VoiceMemoUiAction.NavigateBack -> navigateBack()
+            VoiceMemoUiAction.OpenSettings -> presentation.update {
+                it.copy(
+                    destination = VoiceMemoDestination.Settings,
+                    selectedMemoIds = emptySet(),
+                )
+            }
+
+            is VoiceMemoUiAction.OpenLicenseSource -> mutableEffects.tryEmit(
+                VoiceMemoUiEffect.LaunchIntent(
+                    Intent(Intent.ACTION_VIEW, action.url.toUri()),
+                ),
+            )
+
+            VoiceMemoUiAction.RetryModelAvailabilityCheck ->
+                presentation.update { it.copy(modelCheckNonce = it.modelCheckNonce + 1) }
+
+            is VoiceMemoUiAction.TranscriptionTimestampsChanged -> {
+                container.transcriptionPreferences.timestampsEnabled = action.enabled
+                presentation.update {
+                    it.copy(transcriptionTimestampsEnabled = action.enabled)
+                }
+            }
+
+            is VoiceMemoUiAction.VoiceActivityDetectionChanged -> {
+                container.transcriptionPreferences.voiceActivityDetectionEnabled =
+                    action.enabled
+                presentation.update {
+                    it.copy(voiceActivityDetectionEnabled = action.enabled)
+                }
+            }
+
+            is VoiceMemoUiAction.GpuAccelerationChanged -> {
+                container.transcriptionPreferences.gpuAccelerationEnabled =
+                    action.enabled
+                presentation.update {
+                    it.copy(gpuAccelerationEnabled = action.enabled)
+                }
+            }
+
+            VoiceMemoUiAction.BeginTitleEdit -> presentation.update { local ->
+                local.copy(
+                    titleEditing = true,
+                    titleDraft = uiState.value.detail?.title.orEmpty(),
+                )
+            }
+
+            is VoiceMemoUiAction.TitleDraftChanged ->
+                presentation.update { it.copy(titleDraft = action.title) }
+
+            VoiceMemoUiAction.SaveTitle -> saveTitle()
+            VoiceMemoUiAction.CancelTitleEdit -> presentation.update {
+                it.copy(titleEditing = false, titleDraft = null)
+            }
+
+            VoiceMemoUiAction.ToggleDetailPlayback -> {
+                val memoId = presentation.value.selectedMemoId ?: return
+                viewModelScope.launch {
+                    repository.getMemo(memoId)?.let { memo ->
+                        container.memoPlayer.playOrPause(memo.id, memo.audioPath)
+                    }
+                }
+            }
+
+            is VoiceMemoUiAction.DetailSeekChanged -> {
+                val duration = container.memoPlayer.state.value.durationMillis
+                    .takeIf { it > 0 }
+                    ?: uiState.value.detail?.let { parseDuration(it.durationLabel) }
+                    ?: 0L
+                container.memoPlayer.seekTo((duration * action.fraction.coerceIn(0f, 1f)).toLong())
+            }
+
+            is VoiceMemoUiAction.DetailSectionChanged ->
+                presentation.update { it.copy(detailSection = action.section) }
+
+            is VoiceMemoUiAction.TranscriptLanguageChanged -> setLanguage(action.languageCode)
+            VoiceMemoUiAction.RequestTranscription,
+            VoiceMemoUiAction.RetryTranscription,
+            -> requestTranscription()
+
+            VoiceMemoUiAction.CancelTranscription -> cancelTranscription()
+            VoiceMemoUiAction.BeginTranscriptEdit -> presentation.update {
+                it.copy(
+                    transcriptEditing = true,
+                    transcriptDraft = uiState.value.detail?.transcript?.text.orEmpty(),
+                )
+            }
+
+            is VoiceMemoUiAction.TranscriptDraftChanged ->
+                presentation.update { it.copy(transcriptDraft = action.text) }
+
+            VoiceMemoUiAction.SaveTranscript -> saveTranscript()
+            VoiceMemoUiAction.CancelTranscriptEdit -> presentation.update {
+                it.copy(transcriptEditing = false, transcriptDraft = null)
+            }
+
+            VoiceMemoUiAction.ResetEditedTranscript -> resetEditedTranscript()
+        }
+    }
+
+    fun importAudio(uris: List<Uri>) {
+        val requestedUris = uris.distinct()
+        presentation.update { it.copy(isAudioPickerOpen = false) }
+        if (requestedUris.isEmpty() || presentation.value.isImportingAudio) return
+        presentation.update {
+            it.copy(
+                isImportingAudio = true,
+                selectedMemoIds = emptySet(),
+            )
+        }
+        viewModelScope.launch {
+            val importedTitles = mutableListOf<String>()
+            val failures = mutableListOf<String>()
+            try {
+                requestedUris.forEach { uri ->
+                    try {
+                        importedTitles += container.audioImporter.importAudio(uri).title
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Throwable) {
+                        failures += failure.message ?: "Unsupported or unreadable audio"
+                    }
+                }
+                if (importedTitles.isNotEmpty()) {
+                    presentation.update {
+                        it.copy(
+                            query = "",
+                            selectedMemoIds = emptySet(),
+                        )
+                    }
+                }
+                mutableEffects.emitMessage(
+                    importResultMessage(
+                        importedTitles = importedTitles,
+                        requestedCount = requestedUris.size,
+                        firstFailure = failures.firstOrNull(),
+                    ),
+                )
+            } finally {
+                presentation.update { it.copy(isImportingAudio = false) }
+            }
+        }
+    }
+
+    fun exportBackupTo(uri: Uri?) {
+        presentation.update { it.copy(isBackupExportPickerOpen = false) }
+        if (uri == null || presentation.value.isExportingBackup) return
+        presentation.update { it.copy(isExportingBackup = true) }
+        viewModelScope.launch {
+            var completed = false
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val output = getApplication<Application>()
+                        .contentResolver
+                        .openOutputStream(uri, "w")
+                        ?: error("The selected backup destination could not be opened.")
+                    output.buffered().use { stream ->
+                        container.backupManager.exportBackup(stream)
+                    }
+                }
+                completed = true
+                mutableEffects.emitMessage(
+                    if (result.memoCount == 1) {
+                        "Backup exported with 1 voice memo."
+                    } else {
+                        "Backup exported with ${result.memoCount} voice memos."
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableEffects.emitMessage(
+                    "Couldn’t export backup. " +
+                        (failure.message ?: "The destination could not be written."),
+                )
+            } finally {
+                if (!completed) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching {
+                            getApplication<Application>().contentResolver.delete(uri, null, null)
+                        }
+                    }
+                }
+                presentation.update { it.copy(isExportingBackup = false) }
+            }
+        }
+    }
+
+    fun restoreBackupFrom(uri: Uri?) {
+        presentation.update { it.copy(isBackupRestorePickerOpen = false) }
+        if (uri == null || presentation.value.isRestoringBackup) return
+        presentation.update { it.copy(isRestoringBackup = true) }
+        container.memoPlayer.stop()
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val input = getApplication<Application>()
+                        .contentResolver
+                        .openInputStream(uri)
+                        ?: error("The selected backup could not be opened.")
+                    input.buffered().use { stream ->
+                        container.backupManager.importBackup(stream)
+                    }
+                }
+                presentation.update {
+                    it.copy(
+                        destination = VoiceMemoDestination.Library,
+                        query = "",
+                        selectedMemoId = null,
+                        selectedMemoIds = emptySet(),
+                    )
+                }
+                val restored = result.importedMemoIds.size
+                val message = buildString {
+                    append(
+                        if (restored == 1) {
+                            "Restored 1 voice memo."
+                        } else {
+                            "Restored $restored voice memos."
+                        },
+                    )
+                    if (result.remappedMemoCount > 0) {
+                        append(" Existing copies were kept separately.")
+                    }
+                }
+                mutableEffects.emitMessage(message)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableEffects.emitMessage(
+                    "Couldn’t restore backup. " +
+                        (failure.message ?: "The selected file is not a valid Voice Memo backup."),
+                )
+            } finally {
+                presentation.update { it.copy(isRestoringBackup = false) }
+            }
+        }
+    }
+
+    private fun requestBackupExport() {
+        if (!canStartBackupOperation()) return
+        presentation.update { it.copy(isBackupExportPickerOpen = true) }
+        viewModelScope.launch {
+            val hasMemos = try {
+                repository.selectAllIds().isNotEmpty()
+            } catch (cancelled: CancellationException) {
+                presentation.update { it.copy(isBackupExportPickerOpen = false) }
+                throw cancelled
+            } catch (failure: Throwable) {
+                presentation.update { it.copy(isBackupExportPickerOpen = false) }
+                mutableEffects.emitMessage(
+                    "Couldn’t prepare a backup. " +
+                        (failure.message ?: "The memo library could not be read."),
+                )
+                return@launch
+            }
+            if (!hasMemos) {
+                presentation.update { it.copy(isBackupExportPickerOpen = false) }
+                mutableEffects.emitMessage("Record or import a voice memo before exporting a backup.")
+                return@launch
+            }
+            val effect = VoiceMemoUiEffect.LaunchBackupExport(
+                suggestedFileName = backupFileName(System.currentTimeMillis()),
+            )
+            if (!mutableEffects.tryEmit(effect)) {
+                presentation.update { it.copy(isBackupExportPickerOpen = false) }
+            }
+        }
+    }
+
+    private fun requestBackupRestore() {
+        presentation.update { it.copy(showRestoreBackupConfirmation = false) }
+        if (!canStartBackupOperation()) return
+        presentation.update { it.copy(isBackupRestorePickerOpen = true) }
+        if (!mutableEffects.tryEmit(VoiceMemoUiEffect.LaunchBackupRestore)) {
+            presentation.update { it.copy(isBackupRestorePickerOpen = false) }
+        }
+    }
+
+    private fun canStartBackupOperation(): Boolean {
+        val current = presentation.value
+        if (
+            current.isImportingAudio ||
+            current.isAudioPickerOpen ||
+            current.isBackupBusy()
+        ) {
+            mutableEffects.tryEmit(
+                VoiceMemoUiEffect.Message("Wait for the current file operation to finish."),
+            )
+            return false
+        }
+        val recording = container.recorderController.state.value
+        if (
+            recording is RecordingState.Starting ||
+            recording is RecordingState.Recording ||
+            recording is RecordingState.Paused ||
+            recording is RecordingState.Finalizing
+        ) {
+            mutableEffects.tryEmit(
+                VoiceMemoUiEffect.Message("Stop the current recording before using backups."),
+            )
+            return false
+        }
+        return true
+    }
+
+    private fun confirmDelete() {
+        val ids = presentation.value.pendingDelete?.memoIds.orEmpty()
+        presentation.update { it.copy(pendingDelete = null) }
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                if (container.memoPlayer.state.value.memoId in ids) container.memoPlayer.stop()
+                repository.deleteMemos(ids)
+            }.onSuccess {
+                presentation.update { local ->
+                    local.copy(
+                        selectedMemoIds = emptySet(),
+                        selectedMemoId = local.selectedMemoId?.takeUnless(ids::contains),
+                        destination = if (local.selectedMemoId in ids) {
+                            VoiceMemoDestination.Library
+                        } else {
+                            local.destination
+                        },
+                    )
+                }
+            }.onFailure { error ->
+                mutableEffects.emitMessage(error.message ?: "The memo could not be deleted.")
+            }
+        }
+    }
+
+    private fun share(payload: SharePayload) {
+        val ids = presentation.value.pendingShare?.memoIds.orEmpty()
+        presentation.update { it.copy(pendingShare = null, selectedMemoIds = emptySet()) }
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                val summaries = repository.observeLibrary().firstValue()
+                    .filter { it.id in ids }
+                val shareable = withContext(Dispatchers.IO) {
+                    summaries.map { summary ->
+                        ShareableMemo(
+                            id = summary.id,
+                            title = summary.title,
+                            audioPath = summary.audioPath,
+                            effectiveTranscript = summary.effectiveTranscript.takeIf(String::isNotBlank),
+                        )
+                    }
+                }
+                container.shareExporter.createChooser(
+                    memos = shareable,
+                    content = when (payload) {
+                        SharePayload.Audio -> ShareContent.Audio
+                        SharePayload.Transcript -> ShareContent.Transcript
+                        SharePayload.AudioAndTranscript -> ShareContent.Both
+                    },
+                )
+            }.onSuccess { intent ->
+                mutableEffects.emit(VoiceMemoUiEffect.LaunchIntent(intent))
+            }.onFailure { error ->
+                mutableEffects.emitMessage(error.message ?: "Nothing is available to share.")
+            }
+        }
+    }
+
+    private fun saveTitle() {
+        val memoId = presentation.value.selectedMemoId ?: return
+        val title = presentation.value.titleDraft.orEmpty().trim()
+        if (title.isBlank()) {
+            mutableEffects.tryEmit(VoiceMemoUiEffect.Message("A memo title cannot be empty."))
+            return
+        }
+        presentation.update { it.copy(titleEditing = false, titleDraft = null) }
+        viewModelScope.launch {
+            runCatching { repository.updateTitle(memoId, title) }
+                .onFailure { mutableEffects.emitMessage(it.message ?: "The title could not be saved.") }
+        }
+    }
+
+    private fun setLanguage(code: String) {
+        val memoId = presentation.value.selectedMemoId ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.setLanguageOverride(memoId, code.takeUnless { it == "auto" })
+            }.onFailure {
+                mutableEffects.emitMessage(it.message ?: "The language could not be changed.")
+            }
+        }
+    }
+
+    private fun requestTranscription() {
+        val detail = uiState.value.detail ?: return
+        if (modelAvailability().phase == ModelAvailabilityPhase.Unsupported) {
+            mutableEffects.tryEmit(
+                VoiceMemoUiEffect.Message(modelAvailability().supportingText),
+            )
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                container.transcriptionCoordinator.enqueue(
+                    memoId = detail.id,
+                    languageCode = detail.transcript.selectedLanguageCode,
+                    timestampsEnabled =
+                        presentation.value.transcriptionTimestampsEnabled,
+                    voiceActivityDetectionEnabled =
+                        presentation.value.voiceActivityDetectionEnabled,
+                    gpuAccelerationEnabled =
+                        presentation.value.gpuAccelerationEnabled,
+                )
+            }.onFailure {
+                mutableEffects.emitMessage(it.message ?: "Transcription could not be queued.")
+            }
+        }
+    }
+
+    private fun cancelTranscription() {
+        val selected = presentation.value.selectedMemoId ?: return
+        viewModelScope.launch {
+            val job = repository.observeMemo(selected).firstValue()?.latestJob
+            runCatching {
+                container.transcriptionCoordinator.cancel(selected, job?.id)
+            }.onFailure {
+                mutableEffects.emitMessage(it.message ?: "Transcription could not be cancelled.")
+            }
+        }
+    }
+
+    private fun saveTranscript() {
+        val memoId = presentation.value.selectedMemoId ?: return
+        val draft = presentation.value.transcriptDraft.orEmpty()
+        presentation.update { it.copy(transcriptEditing = false, transcriptDraft = null) }
+        viewModelScope.launch {
+            runCatching { repository.saveEditedTranscript(memoId, draft) }
+                .onFailure { mutableEffects.emitMessage(it.message ?: "The transcript could not be saved.") }
+        }
+    }
+
+    private fun resetEditedTranscript() {
+        val memoId = presentation.value.selectedMemoId ?: return
+        viewModelScope.launch {
+            runCatching { repository.resetEditedTranscript(memoId) }
+                .onFailure { mutableEffects.emitMessage(it.message ?: "The generated transcript could not be restored.") }
+        }
+    }
+
+    private fun navigateBack() {
+        val local = presentation.value
+        when {
+            local.selectedMemoIds.isNotEmpty() ->
+                presentation.update { it.copy(selectedMemoIds = emptySet()) }
+
+            local.destination != VoiceMemoDestination.Library ->
+                presentation.update {
+                    it.copy(
+                        destination = VoiceMemoDestination.Library,
+                        titleEditing = false,
+                        titleDraft = null,
+                        transcriptEditing = false,
+                        transcriptDraft = null,
+                    )
+                }
+        }
+    }
+
+    private fun MemoSummary.toUi(playback: PlaybackState): VoiceMemoListItemUi {
+        val isCurrent = playback.memoId == id
+        val displayTranscript = if (transcriptSource == TranscriptSource.GENERATED) {
+            WhisperTimestampTokens.withoutTimestampMarkers(effectiveTranscript)
+        } else {
+            effectiveTranscript
+        }
+        val waveform = waveformPath
+            ?.let {
+                cachedWaveform(
+                    path = it,
+                    maximumBuckets = LIBRARY_WAVEFORM_BUCKETS,
+                    generation = updatedAtMillis,
+                )
+            }
+            .orEmpty()
+        return VoiceMemoListItemUi(
+            id = id,
+            title = title,
+            monthLabel = monthFormat.format(Date(createdAtMillis)),
+            dateLabel = dateFormat.format(Date(createdAtMillis)),
+            durationLabel = formatDuration(durationMillis),
+            waveform = waveform,
+            playbackFraction = if (isCurrent && playback.durationMillis > 0) {
+                playback.positionMillis.toFloat() / playback.durationMillis
+            } else {
+                0f
+            },
+            isPlaying = isCurrent && playback.isPlaying,
+            transcriptPreview = displayTranscript.takeIf(String::isNotBlank),
+            transcription = transcriptionSummary(latestJob, displayTranscript),
+        )
+    }
+
+    private fun MemoDetail.toUi(
+        playback: PlaybackState,
+        local: PresentationState,
+    ): VoiceMemoDetailUi {
+        val isCurrent = playback.memoId == memo.id
+        val displayTranscript = if (transcriptSource == TranscriptSource.GENERATED) {
+            WhisperTimestampTokens.withoutTimestampMarkers(effectiveTranscript)
+        } else {
+            effectiveTranscript
+        }
+        val transcriptState = transcriptionDetail(latestJob, displayTranscript)
+        return VoiceMemoDetailUi(
+            id = memo.id,
+            title = memo.title,
+            titleDraft = local.titleDraft ?: memo.title,
+            isEditingTitle = local.titleEditing,
+            dateLabel = dateFormat.format(Date(memo.createdAtMillis)),
+            durationLabel = formatDuration(memo.durationMillis),
+            playbackPositionLabel = formatDuration(
+                if (isCurrent) playback.positionMillis else 0L,
+            ),
+            playbackPositionMillis = if (isCurrent) playback.positionMillis else 0L,
+            playbackFraction = if (isCurrent && playback.durationMillis > 0) {
+                playback.positionMillis.toFloat() / playback.durationMillis
+            } else {
+                0f
+            },
+            isPlaying = isCurrent && playback.isPlaying,
+            waveform = memo.waveformPath
+                ?.let {
+                    cachedWaveform(
+                        path = it,
+                        maximumBuckets = DETAIL_WAVEFORM_BUCKETS,
+                        generation = memo.updatedAtMillis,
+                    )
+                }
+                .orEmpty(),
+            selectedSection = local.detailSection,
+            transcript = transcriptState.copy(
+                draft = local.transcriptDraft ?: transcriptState.text,
+                isEditing = local.transcriptEditing,
+                selectedLanguageCode = memo.languageOverride ?: "auto",
+                isEdited = transcript?.editedText != null,
+                segments = if (transcript?.editedText == null) {
+                    chunks
+                        .filter { it.rawText.isNotBlank() }
+                        .sortedBy { it.chunkIndex }
+                        .flatMap { chunk -> chunk.toTranscriptSegments() }
+                } else {
+                    emptyList()
+                },
+            ),
+        )
+    }
+
+    private fun transcriptionSummary(
+        job: TranscriptionJob?,
+        transcript: String,
+    ): TranscriptionSummaryUi {
+        val detail = transcriptionDetail(job, transcript)
+        return TranscriptionSummaryUi(detail.phase, detail.progress, detail.statusLabel)
+    }
+
+    private fun transcriptionDetail(
+        job: TranscriptionJob?,
+        transcript: String,
+    ): TranscriptDetailUi {
+        if (job == null) {
+            return TranscriptDetailUi(
+                phase = if (transcript.isBlank()) TranscriptionPhase.NotRequested else TranscriptionPhase.Complete,
+                statusLabel = if (transcript.isBlank()) "Ready to transcribe locally" else "Transcript ready",
+                text = transcript,
+            )
+        }
+        val progress = if (job.totalChunks > 0) {
+            (
+                job.completedChunks +
+                    job.currentToken.toFloat() / job.currentTokenLimit.coerceAtLeast(1)
+                ) / job.totalChunks
+        } else {
+            null
+        }
+        val phase = when (job.status) {
+            TranscriptionJobStatus.QUEUED -> TranscriptionPhase.Queued
+            TranscriptionJobStatus.RUNNING,
+            TranscriptionJobStatus.PAUSED_FOR_RECORDING,
+            -> when (job.phase) {
+                com.example.voicememo.data.TranscriptionPhase.MERGING,
+                com.example.voicememo.data.TranscriptionPhase.SAVING,
+                -> TranscriptionPhase.Finalizing
+                com.example.voicememo.data.TranscriptionPhase.ENCODING,
+                com.example.voicememo.data.TranscriptionPhase.DECODING,
+                -> TranscriptionPhase.Transcribing
+                else -> TranscriptionPhase.Preparing
+            }
+            TranscriptionJobStatus.SUCCEEDED -> TranscriptionPhase.Complete
+            TranscriptionJobStatus.FAILED -> TranscriptionPhase.Error
+            TranscriptionJobStatus.CANCEL_REQUESTED,
+            TranscriptionJobStatus.CANCELLED,
+            -> if (transcript.isBlank()) TranscriptionPhase.NotRequested else TranscriptionPhase.Complete
+        }
+        val status = when {
+            job.status == TranscriptionJobStatus.PAUSED_FOR_RECORDING -> "Paused while recording"
+            phase == TranscriptionPhase.Queued -> "Queued for local transcription"
+            job.phase == com.example.voicememo.data.TranscriptionPhase.LOADING_MODEL ->
+                "Loading local model"
+            job.phase == com.example.voicememo.data.TranscriptionPhase.PREPARING_AUDIO ->
+                segmentStatus("Preparing", job)
+            job.phase == com.example.voicememo.data.TranscriptionPhase.ENCODING ->
+                segmentStatus("Analyzing", job)
+            phase == TranscriptionPhase.Preparing -> "Preparing local transcription"
+            phase == TranscriptionPhase.Transcribing -> segmentStatus("Transcribing", job)
+            phase == TranscriptionPhase.Finalizing -> "Finalizing transcript"
+            phase == TranscriptionPhase.Complete -> job.warning ?: "Transcript ready"
+            phase == TranscriptionPhase.Error -> job.errorMessage ?: "Transcription failed"
+            else -> "Ready to transcribe locally"
+        }
+        return TranscriptDetailUi(
+            phase = phase,
+            progress = progress?.coerceIn(0f, 1f),
+            statusLabel = status,
+            text = transcript,
+            errorMessage = job.errorMessage,
+        )
+    }
+
+    private fun segmentStatus(action: String, job: TranscriptionJob): String {
+        if (job.totalChunks <= 0) return action
+        val segment = (job.currentChunkIndex ?: job.completedChunks)
+            .coerceIn(0, job.totalChunks - 1)
+        return "$action segment ${segment + 1} of ${job.totalChunks}"
+    }
+
+    private fun RecordingState.toUi(): RecorderUiState = when (this) {
+        RecordingState.Idle -> RecorderUiState()
+        RecordingState.Starting -> RecorderUiState(
+            phase = RecorderPhase.Recording,
+            elapsedLabel = "00:00.0",
+        )
+        is RecordingState.Recording -> RecorderUiState(
+            phase = RecorderPhase.Recording,
+            elapsedLabel = formatDurationTenths(elapsedMillis),
+            waveform = waveform.normalized(),
+        )
+        is RecordingState.Paused -> RecorderUiState(
+            phase = RecorderPhase.Paused,
+            elapsedLabel = formatDurationTenths(elapsedMillis),
+            waveform = waveform.normalized(),
+            errorMessage = if (interrupted) "Paused because another app needed audio." else null,
+        )
+        is RecordingState.Finalizing -> RecorderUiState(
+            phase = RecorderPhase.Stopping,
+            elapsedLabel = formatDurationTenths(elapsedMillis),
+        )
+        is RecordingState.Completed -> RecorderUiState()
+        is RecordingState.Failed -> RecorderUiState(errorMessage = message)
+    }
+
+    private fun List<WaveformBucket>.normalized(): List<Float> =
+        takeLast(180).map { bucket ->
+            maxOf(
+                kotlin.math.abs(bucket.minimum.toInt()),
+                kotlin.math.abs(bucket.maximum.toInt()),
+            ) / Short.MAX_VALUE.toFloat()
+        }
+
+    private fun cachedWaveform(
+        path: String,
+        maximumBuckets: Int,
+        generation: Long,
+    ): List<Float> =
+        waveformCache.getOrPut(WaveformCacheKey(path, maximumBuckets, generation)) {
+            WaveformSidecar.normalized(File(path), maximumBuckets)
+        }
+
+    private fun modelAvailability(): ModelAvailabilityUiState {
+        val app = getApplication<Application>()
+        if (app.getSystemService(ActivityManager::class.java).isLowRamDevice) {
+            return ModelAvailabilityUiState(
+                phase = ModelAvailabilityPhase.Unsupported,
+                headline = "Transcription isn’t supported on this device",
+                supportingText =
+                    "Android designates this as a low-RAM device. Recording and playback still work, but the bundled model cannot be loaded safely.",
+            )
+        }
+        return runCatching {
+            app.assets.openFd(WhisperAssets.MODEL).use { descriptor ->
+                check(descriptor.declaredLength == WhisperAssets.MODEL_SIZE_BYTES)
+            }
+            ModelAvailabilityUiState(
+                phase = ModelAvailabilityPhase.Available,
+                headline = "Local transcription ready",
+                supportingText = "Whisper large-v3 Turbo is bundled and runs entirely on this device.",
+            )
+        }.getOrElse { error ->
+            ModelAvailabilityUiState(
+                phase = ModelAvailabilityPhase.Error,
+                headline = "Local model unavailable",
+                supportingText = error.message ?: "The bundled model could not be verified.",
+            )
+        }
+    }
+
+    private fun importResultMessage(
+        importedTitles: List<String>,
+        requestedCount: Int,
+        firstFailure: String?,
+    ): String = when {
+        importedTitles.size == 1 && requestedCount == 1 ->
+            "Imported “${importedTitles.single()}”."
+
+        importedTitles.size == requestedCount ->
+            "Imported ${importedTitles.size} voice memos."
+
+        importedTitles.isNotEmpty() ->
+            "Imported ${importedTitles.size} of $requestedCount voice memos. " +
+                (firstFailure ?: "Some files could not be imported.")
+
+        else -> "Couldn’t import audio. " +
+            (firstFailure ?: "The selected files were unsupported or unreadable.")
+    }
+
+    private suspend fun <T> Flow<T>.firstValue(): T = first()
+
+    private suspend fun MutableSharedFlow<VoiceMemoUiEffect>.emitMessage(message: String) {
+        emit(VoiceMemoUiEffect.Message(message))
+    }
+
+    private data class PresentationState(
+        val destination: VoiceMemoDestination = VoiceMemoDestination.Library,
+        val query: String = "",
+        val selectedMemoIds: Set<String> = emptySet(),
+        val selectedMemoId: String? = null,
+        val isImportingAudio: Boolean = false,
+        val isAudioPickerOpen: Boolean = false,
+        val isExportingBackup: Boolean = false,
+        val isRestoringBackup: Boolean = false,
+        val isBackupExportPickerOpen: Boolean = false,
+        val isBackupRestorePickerOpen: Boolean = false,
+        val showRestoreBackupConfirmation: Boolean = false,
+        val detailSection: DetailSection = DetailSection.Audio,
+        val titleDraft: String? = null,
+        val titleEditing: Boolean = false,
+        val transcriptDraft: String? = null,
+        val transcriptEditing: Boolean = false,
+        val pendingDelete: PendingDeleteUi? = null,
+        val pendingShare: PendingShareUi? = null,
+        val modelCheckNonce: Int = 0,
+        val transcriptionTimestampsEnabled: Boolean = false,
+        val voiceActivityDetectionEnabled: Boolean = true,
+        val gpuAccelerationEnabled: Boolean = true,
+    ) {
+        fun isBackupBusy(): Boolean =
+            isExportingBackup ||
+                isRestoringBackup ||
+                isBackupExportPickerOpen ||
+                isBackupRestorePickerOpen
+    }
+
+    private data class WaveformCacheKey(
+        val path: String,
+        val maximumBuckets: Int,
+        val generation: Long,
+    )
+
+    private val monthFormat = SimpleDateFormat("MMMM", Locale.getDefault())
+    private val dateFormat = SimpleDateFormat("EEE, MMM d", Locale.getDefault())
+
+    private companion object {
+        const val LIBRARY_WAVEFORM_BUCKETS = 160
+        const val DETAIL_WAVEFORM_BUCKETS = 260
+        const val CHUNK_OVERLAP_MILLIS = 2_000L
+    }
+
+    private fun TranscriptChunk.toTranscriptSegments(): List<TranscriptSegmentUi> {
+        val timestampBegin = WhisperTimestampTokens.DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID
+        if (!WhisperTimestampTokens.containsTimestamp(tokenIds, timestampBegin)) {
+            return listOf(coarseTranscriptSegment())
+        }
+        val chunkDuration = (windowEndMillis - windowStartMillis).coerceAtLeast(0L)
+        val parsed = WhisperTimestampTokens.parseSegments(
+            tokens = tokenIds,
+            timestampBeginTokenId = timestampBegin,
+            tokenizer = transcriptTokenizer,
+            audioDurationMillis = chunkDuration,
+        )
+        if (parsed.isEmpty()) return listOf(coarseTranscriptSegment())
+
+        val overlapBoundary = if (chunkIndex == 0) 0L else CHUNK_OVERLAP_MILLIS
+        return parsed.mapIndexedNotNull { segmentIndex, segment ->
+            if (segment.endMillis <= overlapBoundary) {
+                null
+            } else {
+                val startMillis =
+                    windowStartMillis + maxOf(segment.startMillis, overlapBoundary)
+                val endMillis = windowStartMillis + segment.endMillis
+                if (endMillis <= startMillis || segment.text.isBlank()) {
+                    null
+                } else {
+                    TranscriptSegmentUi(
+                        id = "$jobId:$chunkIndex:$segmentIndex",
+                        startMillis = startMillis,
+                        endMillis = endMillis,
+                        startLabel = formatDuration(startMillis),
+                        endLabel = formatDuration(endMillis),
+                        text = segment.text,
+                    )
+                }
+            }
+        }.ifEmpty { listOf(coarseTranscriptSegment()) }
+    }
+
+    private fun TranscriptChunk.coarseTranscriptSegment(): TranscriptSegmentUi =
+        TranscriptSegmentUi(
+            id = "$jobId:$chunkIndex",
+            startMillis = windowStartMillis,
+            endMillis = windowEndMillis,
+            startLabel = formatDuration(windowStartMillis),
+            endLabel = formatDuration(windowEndMillis),
+            text = WhisperTimestampTokens.withoutTimestampMarkers(rawText),
+        )
+
+    private fun formatDuration(millis: Long): String {
+        val totalSeconds = millis.coerceAtLeast(0L) / 1_000L
+        val hours = totalSeconds / 3_600L
+        val minutes = totalSeconds / 60L % 60L
+        val seconds = totalSeconds % 60L
+        return if (hours > 0) {
+            "%d:%02d:%02d".format(hours, minutes, seconds)
+        } else {
+            "%02d:%02d".format(minutes, seconds)
+        }
+    }
+
+    private fun formatDurationTenths(millis: Long): String {
+        val totalTenths = millis.coerceAtLeast(0L) / 100L
+        val minutes = totalTenths / 600L
+        val seconds = totalTenths / 10L % 60L
+        return "%02d:%02d.%d".format(minutes, seconds, totalTenths % 10L)
+    }
+
+    private fun parseDuration(label: String): Long {
+        val values = label.split(':').mapNotNull { it.toLongOrNull() }
+        return when (values.size) {
+            2 -> (values[0] * 60L + values[1]) * 1_000L
+            3 -> (values[0] * 3_600L + values[1] * 60L + values[2]) * 1_000L
+            else -> 0L
+        }
+    }
+}
+
+internal fun backupFileName(nowMillis: Long): String =
+    "Voice-Memo-backup-" +
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(nowMillis)) +
+        ".zip"

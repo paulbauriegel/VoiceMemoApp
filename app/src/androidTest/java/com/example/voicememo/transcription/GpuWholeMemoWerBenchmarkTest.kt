@@ -1,0 +1,662 @@
+package com.example.voicememo.transcription
+
+import android.content.Context
+import android.content.res.AssetManager
+import android.os.Build
+import android.os.Debug
+import android.os.PowerManager
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.example.voicememo.VoiceMemoApplication
+import java.io.File
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Non-persisting whole-memo quality and latency benchmark.
+ *
+ * The benchmark reads one existing memo from app-private storage and never
+ * creates or updates a transcript, job, chunk, memo, or audio file. The CPU
+ * result produced in this same run is the word-error-rate oracle.
+ */
+@RunWith(AndroidJUnit4::class)
+class GpuWholeMemoWerBenchmarkTest {
+    @Test
+    fun compareWholeMemoBackends() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val arguments = InstrumentationRegistry.getArguments()
+        val context = instrumentation.targetContext
+        val application = context.applicationContext as VoiceMemoApplication
+        val memoId = requireArgument(arguments.getString(ARG_MEMO_ID), ARG_MEMO_ID)
+        val runId = requireSafeRunId(arguments.getString(ARG_RUN_ID))
+        val useFullFloatDecoder =
+            arguments.getString(ARG_USE_FULL_FLOAT_DECODER)
+                ?.toBooleanStrictOrNull()
+                ?: false
+        val promotionGate =
+            arguments.getString(ARG_PROMOTION_GATE)
+                ?.toBooleanStrictOrNull()
+                ?: false
+        require(!promotionGate || useFullFloatDecoder) {
+            "The GPU promotion gate requires the complete FLOAT32 decoder model."
+        }
+        val gpuModelOverride = if (useFullFloatDecoder) {
+            GpuModelOverride(
+                assets = instrumentation.context.assets,
+                path = FULL_FLOAT_DECODER_ASSET,
+            )
+        } else {
+            null
+        }
+        val memo = requireNotNull(application.container.memoRepository.getMemo(memoId)) {
+            "Unknown memo $memoId."
+        }
+        require(!memo.pendingDeletion) { "Memo $memoId is pending deletion." }
+        val audioFile = File(memo.audioPath)
+        require(audioFile.isFile) { "Memo audio is missing." }
+
+        val reportDirectory = File(context.cacheDir, REPORT_DIRECTORY).apply { mkdirs() }
+        val reportFile = File(reportDirectory, "whole-$runId.json")
+        val temporaryReport = File(reportDirectory, "${reportFile.name}.tmp")
+        reportFile.delete()
+        temporaryReport.delete()
+
+        val report = JSONObject()
+            .put("run_id", runId)
+            .put("memo_id", memoId)
+            .put("memo_duration_millis", memo.durationMillis)
+            .put("persisted_output", false)
+            .put("use_full_float_decoder", useFullFloatDecoder)
+            .put("promotion_gate", promotionGate)
+            .put("model_sha256", WhisperAssets.MODEL_SHA256)
+            .put("status", STATUS_RUNNING)
+        fun publishCheckpoint() {
+            temporaryReport.writeText(report.toString(2))
+            reportFile.delete()
+            check(temporaryReport.renameTo(reportFile)) {
+                "Could not publish whole-memo GPU WER report."
+            }
+        }
+
+        try {
+            val audioInfo = StreamingWavChunkSource.open(audioFile).use { source ->
+                JSONObject()
+                    .put("source_sample_rate", source.info.sourceSampleRate)
+                    .put("source_channels", source.info.sourceChannels)
+                    .put("whisper_sample_count", source.info.whisperSampleCount)
+                    .put("chunk_count", source.chunkCount)
+            }
+            report.put("audio", audioInfo)
+
+            val cpu = benchmarkWithEngines(
+                context = context,
+                audioFile = audioFile,
+                mode = Mode.CPU_2X3,
+                language = WhisperLanguage.Auto,
+                openEngines = {
+                    val first = LiteRtWhisperEngine.open(context, threadCount = 3)
+                    try {
+                        listOf(
+                            first,
+                            LiteRtWhisperEngine.open(context, threadCount = 3),
+                        )
+                    } catch (error: Throwable) {
+                        first.close()
+                        throw error
+                    }
+                },
+            )
+            require(cpu.transcript.detectedLanguage != "und") {
+                "CPU reference could not detect a language."
+            }
+            val referenceLanguage = WhisperLanguage.Forced(cpu.transcript.detectedLanguage)
+            report
+                .put("reference", cpu.toJson(referenceText = null))
+                .put("candidates", JSONArray())
+            publishCheckpoint()
+
+            val candidates = report.getJSONArray("candidates")
+            if (!promotionGate) {
+                candidates.put(
+                    benchmarkCandidate(
+                        context = context,
+                        audioFile = audioFile,
+                        mode = Mode.FULL_GPU_DOMINANT,
+                        reference = cpu.transcript,
+                        language = referenceLanguage,
+                        openEngines = {
+                            listOf(
+                                LiteRtFullGpuWhisperEngine.open(
+                                    context = context,
+                                    diagnosticModelAssets = gpuModelOverride?.assets,
+                                    diagnosticModelPath = gpuModelOverride?.path,
+                                ),
+                            )
+                        },
+                    ),
+                )
+                publishCheckpoint()
+            }
+            candidates.put(
+                benchmarkCandidate(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = Mode.FULL_GPU_NO_SOURCE_QUANT,
+                    reference = cpu.transcript,
+                    language = referenceLanguage,
+                    openEngines = {
+                        listOf(
+                            LiteRtFullGpuWhisperEngine.open(
+                                context = context,
+                                allowSourceQuantizedFcConvOps = false,
+                                diagnosticModelAssets = gpuModelOverride?.assets,
+                                diagnosticModelPath = gpuModelOverride?.path,
+                            ),
+                        )
+                    },
+                ),
+            )
+            publishCheckpoint()
+            if (promotionGate) {
+                report.put("status", STATUS_COMPLETED)
+                publishCheckpoint()
+                return@runBlocking
+            }
+            candidates.put(
+                benchmarkCandidate(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = Mode.GPU_ENCODER_CPU_DECODER,
+                    reference = cpu.transcript,
+                    language = referenceLanguage,
+                    openEngines = {
+                        listOf(LiteRtGpuWhisperEngine.open(context, cpuThreadCount = 3))
+                    },
+                ),
+            )
+            publishCheckpoint()
+            candidates.put(
+                benchmarkCandidate(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = Mode.CPU_ENCODER_GPU_DECODER_NO_SOURCE_QUANT,
+                    reference = cpu.transcript,
+                    language = referenceLanguage,
+                    openEngines = {
+                        listOf(
+                            openCpuEncoderGpuDecoderEngine(
+                                context = context,
+                                allowSourceQuantizedFcConvOps = false,
+                                gpuModelOverride = gpuModelOverride,
+                            ),
+                        )
+                    },
+                ),
+            )
+            publishCheckpoint()
+            candidates.put(
+                benchmarkCandidate(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = Mode.CPU_ENCODER_GPU_DECODER,
+                    reference = cpu.transcript,
+                    language = referenceLanguage,
+                    openEngines = {
+                        listOf(
+                            openCpuEncoderGpuDecoderEngine(
+                                context = context,
+                                gpuModelOverride = gpuModelOverride,
+                            ),
+                        )
+                    },
+                ),
+            )
+            publishCheckpoint()
+            candidates.put(
+                benchmarkCandidate(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = Mode.STRICT_GPU_MODEL,
+                    reference = cpu.transcript,
+                    language = referenceLanguage,
+                    openEngines = {
+                        listOf(
+                            LiteRtFullGpuWhisperEngine.open(
+                                context = context,
+                                strictGpuOnly = true,
+                                diagnosticModelAssets = gpuModelOverride?.assets,
+                                diagnosticModelPath = gpuModelOverride?.path,
+                            ),
+                        )
+                    },
+                ),
+            )
+            publishCheckpoint()
+            report
+                .put("status", STATUS_COMPLETED)
+        } catch (error: Throwable) {
+            report
+                .put("status", STATUS_FAILED)
+                .put("error_type", error.javaClass.name)
+                .put("error_message", sanitizedMessage(error))
+        }
+
+        publishCheckpoint()
+    }
+
+    private fun benchmarkCandidate(
+        context: Context,
+        audioFile: File,
+        mode: Mode,
+        reference: LongFormTranscript,
+        language: WhisperLanguage.Forced,
+        openEngines: () -> List<WhisperEngine>,
+    ): JSONObject = try {
+        benchmarkWithEngines(
+            context = context,
+            audioFile = audioFile,
+            mode = mode,
+            language = language,
+            openEngines = openEngines,
+        ).toJson(referenceText = reference.text)
+    } catch (error: Throwable) {
+        JSONObject()
+            .put("mode", mode.id)
+            .put("status", STATUS_FAILED)
+            .put("coverage", mode.coverageJson())
+            .put("error_type", error.javaClass.name)
+            .put("error_message", sanitizedMessage(error))
+    }
+
+    private fun benchmarkWithEngines(
+        context: Context,
+        audioFile: File,
+        mode: Mode,
+        language: WhisperLanguage,
+        openEngines: () -> List<WhisperEngine>,
+    ): BenchmarkResult {
+        val totalStarted = System.nanoTime()
+        val loadStarted = System.nanoTime()
+        val engines = openEngines()
+        require(engines.isNotEmpty()) { "Benchmark mode ${mode.id} opened no engines." }
+        val modelLoadMillis = elapsedMillis(loadStarted)
+        try {
+            val inferenceStarted = System.nanoTime()
+            val transcript = StreamingWavChunkSource.open(audioFile).use { source ->
+                val windows = (0 until source.chunkCount).map(source::window)
+                LongFormTranscriber(engines).transcribeBatches(
+                    windows = windows,
+                    loadAudio = { window -> source.readChunk(window.index).samples },
+                    language = language,
+                )
+            }
+            val inferenceWallMillis = elapsedMillis(inferenceStarted)
+            return BenchmarkResult(
+                mode = mode,
+                transcript = transcript,
+                modelLoadMillis = modelLoadMillis,
+                inferenceWallMillis = inferenceWallMillis,
+                totalWallMillis = elapsedMillis(totalStarted),
+                memory = memorySnapshot(context),
+            )
+        } finally {
+            engines.asReversed().forEach { engine -> runCatching(engine::close) }
+        }
+    }
+
+    private fun openCpuEncoderGpuDecoderEngine(
+        context: Context,
+        allowSourceQuantizedFcConvOps: Boolean = true,
+        gpuModelOverride: GpuModelOverride? = null,
+    ): WhisperEngine {
+        val cpu = LiteRtWhisperEngine.open(context, threadCount = 3)
+        try {
+            val gpu = LiteRtFullGpuWhisperEngine.open(
+                context = context,
+                allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
+                diagnosticModelAssets = gpuModelOverride?.assets,
+                diagnosticModelPath = gpuModelOverride?.path,
+            )
+            return CpuEncoderGpuDecoderEngine(cpu = cpu, gpu = gpu)
+        } catch (error: Throwable) {
+            cpu.close()
+            throw error
+        }
+    }
+
+    private class CpuEncoderGpuDecoderEngine(
+        private val cpu: LiteRtWhisperEngine,
+        private val gpu: LiteRtFullGpuWhisperEngine,
+    ) : WhisperEngine {
+        private val closed = AtomicBoolean(false)
+
+        override fun transcribeChunk(
+            audio: FloatArray,
+            language: WhisperLanguage,
+            shouldCancel: () -> Boolean,
+            onTokenProgress: (generated: Int, limit: Int) -> Unit,
+        ): WhisperChunkResult {
+            check(!closed.get()) { "CPU-encoder/GPU-decoder engine is closed." }
+            val started = System.nanoTime()
+            val encoderState = cpu.encodeChunk(audio, shouldCancel)
+            return gpu.transcribeEncodedChunk(
+                encoderState = encoderState,
+                language = language,
+                shouldCancel = shouldCancel,
+                onTokenProgress = onTokenProgress,
+                startedNanos = started,
+            )
+        }
+
+        override fun decodeTokens(tokens: List<Int>): String = cpu.decodeTokens(tokens)
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            runCatching(gpu::close)
+            runCatching(cpu::close)
+        }
+    }
+
+    private data class BenchmarkResult(
+        val mode: Mode,
+        val transcript: LongFormTranscript,
+        val modelLoadMillis: Long,
+        val inferenceWallMillis: Long,
+        val totalWallMillis: Long,
+        val memory: JSONObject,
+    ) {
+        fun toJson(referenceText: String?): JSONObject {
+            val result = JSONObject()
+                .put("mode", mode.id)
+                .put("status", STATUS_COMPLETED)
+                .put("coverage", mode.coverageJson())
+                .put("model_load_millis", modelLoadMillis)
+                .put("inference_wall_millis", inferenceWallMillis)
+                .put("total_wall_millis", totalWallMillis)
+                .put("detected_language", transcript.detectedLanguage)
+                .put("text", transcript.text)
+                .put("token_count", transcript.tokens.size)
+                .put("word_count", normalizedWords(transcript.text).size)
+                .put("warnings", JSONArray(transcript.warnings))
+                .put("memory_after_inference", memory)
+                .put(
+                    "chunks",
+                    JSONArray().also { chunks ->
+                        transcript.chunks.forEach { chunk ->
+                            chunks.put(
+                                JSONObject()
+                                    .put("index", chunk.window.index)
+                                    .put("start_sample", chunk.window.startSample)
+                                    .put("end_sample", chunk.window.endSample)
+                                    .put("token_count", chunk.result.tokens.size)
+                                    .put(
+                                        "inference_millis",
+                                        chunk.result.inferenceMillis,
+                                    )
+                                    .put("truncated", chunk.result.truncated)
+                                    .put("skipped_by_vad", chunk.skippedByVad)
+                                    .put(
+                                        "retried_as_half_windows",
+                                        chunk.retriedAsHalfWindows,
+                                    ),
+                            )
+                        }
+                    },
+                )
+            if (referenceText != null) {
+                result.put("word_error", wordError(referenceText, transcript.text).toJson())
+            } else {
+                result.put(
+                    "word_error",
+                    WordError(
+                        referenceWords = normalizedWords(transcript.text).size,
+                        candidateWords = normalizedWords(transcript.text).size,
+                        substitutions = 0,
+                        deletions = 0,
+                        insertions = 0,
+                    ).toJson(),
+                )
+            }
+            return result
+        }
+    }
+
+    private enum class Mode(
+        val id: String,
+        val frontend: String,
+        val encoder: String,
+        val decoder: String,
+        val tokenSelection: String,
+        val neuralModelStrictlyGpuOnly: Boolean,
+    ) {
+        CPU_2X3(
+            id = "cpu-2x3",
+            frontend = "CPU",
+            encoder = "CPU_XNNPACK",
+            decoder = "CPU_XNNPACK",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        FULL_GPU_DOMINANT(
+            id = "gpu-encoder-gpu-decoder",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        FULL_GPU_NO_SOURCE_QUANT(
+            id = "gpu-encoder-gpu-decoder-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32_NO_SOURCE_QUANT",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER_NO_SOURCE_QUANT",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        GPU_ENCODER_CPU_DECODER(
+            id = "gpu-encoder-cpu-decoder",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32",
+            decoder = "CPU_XNNPACK",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        CPU_ENCODER_GPU_DECODER(
+            id = "cpu-encoder-gpu-decoder",
+            frontend = "CPU",
+            encoder = "CPU_XNNPACK",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        CPU_ENCODER_GPU_DECODER_NO_SOURCE_QUANT(
+            id = "cpu-encoder-gpu-decoder-no-source-quant",
+            frontend = "CPU",
+            encoder = "CPU_XNNPACK",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER_NO_SOURCE_QUANT",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        STRICT_GPU_MODEL(
+            id = "strict-gpu-model",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32",
+            decoder = "GPU_OPENCL_FP32",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = true,
+        ),
+        ;
+
+        fun coverageJson(): JSONObject = JSONObject()
+            .put("frontend", frontend)
+            .put("encoder", encoder)
+            .put("decoder", decoder)
+            .put("token_selection", tokenSelection)
+            .put("neural_model_strictly_gpu_only", neuralModelStrictlyGpuOnly)
+    }
+
+    private data class WordError(
+        val referenceWords: Int,
+        val candidateWords: Int,
+        val substitutions: Int,
+        val deletions: Int,
+        val insertions: Int,
+    ) {
+        val edits: Int get() = substitutions + deletions + insertions
+        val rate: Double
+            get() = if (referenceWords == 0) {
+                if (candidateWords == 0) 0.0 else 1.0
+            } else {
+                edits.toDouble() / referenceWords
+            }
+
+        fun toJson(): JSONObject = JSONObject()
+            .put("reference_words", referenceWords)
+            .put("candidate_words", candidateWords)
+            .put("substitutions", substitutions)
+            .put("deletions", deletions)
+            .put("insertions", insertions)
+            .put("edits", edits)
+            .put("rate", rate)
+            .put("percent", rate * 100.0)
+    }
+
+    private data class EditCell(
+        val cost: Int,
+        val substitutions: Int,
+        val deletions: Int,
+        val insertions: Int,
+    )
+
+    private data class GpuModelOverride(
+        val assets: AssetManager,
+        val path: String,
+    )
+
+    companion object {
+        private const val ARG_MEMO_ID = "memoId"
+        private const val ARG_RUN_ID = "runId"
+        private const val ARG_USE_FULL_FLOAT_DECODER = "useFullFloatDecoder"
+        private const val ARG_PROMOTION_GATE = "promotionGate"
+        private const val FULL_FLOAT_DECODER_ASSET =
+            "whisper-full-float-decoder/decoder.tflite"
+        private const val REPORT_DIRECTORY = "gpu-wer"
+        private const val STATUS_RUNNING = "running"
+        private const val STATUS_COMPLETED = "completed"
+        private const val STATUS_FAILED = "failed"
+        private val WORD_PATTERN =
+            Regex("""[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*""")
+
+        private fun wordError(reference: String, candidate: String): WordError {
+            val expected = normalizedWords(reference)
+            val actual = normalizedWords(candidate)
+            val rows = Array(expected.size + 1) {
+                Array(actual.size + 1) { EditCell(0, 0, 0, 0) }
+            }
+            for (index in 1..expected.size) {
+                rows[index][0] = EditCell(index, 0, index, 0)
+            }
+            for (index in 1..actual.size) {
+                rows[0][index] = EditCell(index, 0, 0, index)
+            }
+            for (expectedIndex in 1..expected.size) {
+                for (actualIndex in 1..actual.size) {
+                    val diagonal = rows[expectedIndex - 1][actualIndex - 1]
+                    val substitution = if (
+                        expected[expectedIndex - 1] == actual[actualIndex - 1]
+                    ) {
+                        diagonal
+                    } else {
+                        diagonal.copy(
+                            cost = diagonal.cost + 1,
+                            substitutions = diagonal.substitutions + 1,
+                        )
+                    }
+                    val deletionBase = rows[expectedIndex - 1][actualIndex]
+                    val deletion = deletionBase.copy(
+                        cost = deletionBase.cost + 1,
+                        deletions = deletionBase.deletions + 1,
+                    )
+                    val insertionBase = rows[expectedIndex][actualIndex - 1]
+                    val insertion = insertionBase.copy(
+                        cost = insertionBase.cost + 1,
+                        insertions = insertionBase.insertions + 1,
+                    )
+                    rows[expectedIndex][actualIndex] =
+                        listOf(substitution, deletion, insertion).minWith(
+                            compareBy<EditCell>(
+                                { it.cost },
+                                { it.substitutions },
+                                { it.deletions },
+                                { it.insertions },
+                            ),
+                        )
+                }
+            }
+            val result = rows[expected.size][actual.size]
+            return WordError(
+                referenceWords = expected.size,
+                candidateWords = actual.size,
+                substitutions = result.substitutions,
+                deletions = result.deletions,
+                insertions = result.insertions,
+            )
+        }
+
+        private fun normalizedWords(text: String): List<String> =
+            WORD_PATTERN.findAll(text.lowercase(Locale.ROOT))
+                .map(MatchResult::value)
+                .toList()
+
+        private fun elapsedMillis(startedNanos: Long): Long =
+            (System.nanoTime() - startedNanos) / 1_000_000L
+
+        private fun requireArgument(value: String?, label: String): String {
+            val result = value?.trim().orEmpty()
+            require(result.matches(Regex("[A-Za-z0-9-]+"))) {
+                "$label is missing or invalid."
+            }
+            return result
+        }
+
+        private fun requireSafeRunId(value: String?): String {
+            val result = value?.trim().orEmpty()
+            require(result.matches(Regex("[A-Za-z0-9-]+"))) {
+                "$ARG_RUN_ID is missing or invalid."
+            }
+            return result
+        }
+
+        private fun sanitizedMessage(error: Throwable): String =
+            error.message
+                ?.lineSequence()
+                ?.firstOrNull()
+                ?.trim()
+                ?.take(500)
+                ?.takeIf(String::isNotEmpty)
+                ?: error.javaClass.simpleName
+
+        private fun memorySnapshot(context: Context): JSONObject {
+            val memoryInfo = Debug.MemoryInfo()
+            Debug.getMemoryInfo(memoryInfo)
+            val runtime = Runtime.getRuntime()
+            val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                context.getSystemService(PowerManager::class.java)?.currentThermalStatus
+            } else {
+                null
+            }
+            return JSONObject()
+                .put("total_pss_kib", memoryInfo.totalPss)
+                .put("native_heap_allocated_bytes", Debug.getNativeHeapAllocatedSize())
+                .put("java_heap_used_bytes", runtime.totalMemory() - runtime.freeMemory())
+                .put("java_heap_committed_bytes", runtime.totalMemory())
+                .put("java_heap_max_bytes", runtime.maxMemory())
+                .put("thermal_status", thermalStatus ?: JSONObject.NULL)
+        }
+    }
+}

@@ -1,0 +1,15 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "whisper_gpu_probe",
+    srcs = ["whisper_gpu_probe.cc"],
+    deps = [
+        "//tflite:framework",
+        "//tflite/delegates/gpu:delegate",
+        "//tflite/delegates/gpu:delegate_options",
+        "//tflite/kernels:builtin_ops",
+        "//tflite/kernels:kernel_util",
+    ],
+)

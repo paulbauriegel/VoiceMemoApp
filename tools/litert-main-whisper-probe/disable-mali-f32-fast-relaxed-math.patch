@@ -1,0 +1,15 @@
+diff --git a/tflite/delegates/gpu/common/tasks/conv_generic.cc b/tflite/delegates/gpu/common/tasks/conv_generic.cc
+index d02b468..f25f9a6 100644
+--- a/tflite/delegates/gpu/common/tasks/conv_generic.cc
++++ b/tflite/delegates/gpu/common/tasks/conv_generic.cc
+@@ -302,7 +302,9 @@ void ConvGeneric::GenerateCode(const GpuInfo& gpu_info) {
+     compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
+   }
+   if (gpu_info.IsMali()) {
+-    compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
++    if (definition_.precision != CalculationsPrecision::F32) {
++      compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
++    }
+     compiler_options_.push_back(CompilerOptions::kClRegisterAllocation64);
+   }
+   if (conv_params_.IsPrivateMemBroadcast() &&
