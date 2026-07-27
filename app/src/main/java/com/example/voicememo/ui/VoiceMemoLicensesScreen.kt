@@ -32,6 +32,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -58,6 +59,7 @@ fun VoiceMemoLicensesScreen(
     transcriptionTimestampsEnabled: Boolean = false,
     voiceActivityDetectionEnabled: Boolean = true,
     gpuAccelerationEnabled: Boolean = true,
+    transcriptionModelId: String = "whisper-large-v3-turbo",
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -172,6 +174,15 @@ fun VoiceMemoLicensesScreen(
 
             item(key = "transcription-heading") {
                 SettingsSectionHeading("Transcription")
+            }
+
+            item(key = "transcription-model") {
+                TranscriptionModelSettingsCard(
+                    selectedModelId = transcriptionModelId,
+                    onSelected = { modelId ->
+                        onAction(VoiceMemoUiAction.TranscriptionModelChanged(modelId))
+                    },
+                )
             }
 
             item(key = "gpu-acceleration") {
@@ -330,6 +341,63 @@ private fun TranscriptionToggleSettingsCard(
                 containerColor = MaterialTheme.colorScheme.surfaceContainer,
             ),
         )
+    }
+}
+
+@Composable
+private fun TranscriptionModelSettingsCard(
+    selectedModelId: String,
+    onSelected: (String) -> Unit,
+) {
+    val models = listOf(
+        Triple(
+            "whisper-large-v3-turbo",
+            "Whisper Large v3 Turbo",
+            "Existing baseline model; supports language selection and optional timestamps.",
+        ),
+        Triple(
+            "parakeet-tdt-0.6b-v3",
+            "Parakeet TDT 0.6B v3",
+            "Faster 5-second multilingual model with automatic language detection.",
+        ),
+    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("settings_transcription_model"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column {
+            models.forEachIndexed { index, (id, name, description) ->
+                ListItem(
+                    headlineContent = { Text(name) },
+                    supportingContent = { Text(description) },
+                    trailingContent = {
+                        RadioButton(
+                            selected = selectedModelId == id,
+                            onClick = null,
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 72.dp)
+                        .clickable { onSelected(id) }
+                        .testTag("settings_transcription_model_$id"),
+                    colors = ListItemDefaults.colors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    ),
+                )
+                if (index != models.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                }
+            }
+        }
     }
 }
 

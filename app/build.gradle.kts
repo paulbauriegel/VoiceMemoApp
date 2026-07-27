@@ -101,6 +101,13 @@ val useStrictMathGpuProbe = providers
         value.toBooleanStrictOrNull()
             ?: error("useStrictMathGpuProbe must be true or false.")
     }
+val useFp16Fp32AccumGpuProbe = providers
+    .gradleProperty("useFp16Fp32AccumGpuProbe")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("useFp16Fp32AccumGpuProbe must be true or false.")
+    }
 val installReleaseLocally = providers
     .gradleProperty("installReleaseLocally")
     .orElse("false")
@@ -174,6 +181,10 @@ val fullFloatDecoderDiagnosticAssetRoot =
     layout.buildDirectory.dir("generated/fullFloatDecoderAndroidTestAssets")
 val fullFloatDecoderProductionAssetRoot =
     layout.buildDirectory.dir("generated/fullFloatDecoderProductionAssets")
+val parakeetProductionAssetRoot =
+    layout.buildDirectory.dir("generated/parakeetProductionAssets")
+val parakeetSourceAssetRoot =
+    layout.projectDirectory.dir("src/main/generatedAssets/parakeet")
 val fullFloatDecoderProductionAssetPath =
     "whisper/whisper_large_v3_turbo_full_float_decoder.tflite"
 val sileroVadAssetRoot =
@@ -190,6 +201,19 @@ val strictMathGpuProbePatchedAcceleratorSha256 =
     "9dbc2ff9a9c2b0297fecb3fb5ac48df0442c0707224627a2e76ac3270b0d89b6"
 val strictMathGpuProbeFlag = "-cl-fast-relaxed-math".toByteArray(Charsets.US_ASCII)
 val strictMathGpuProbeFlagOffset = 0x510c7
+val fp16Fp32AccumGpuProbeAar = rootProject.layout.projectDirectory.file(
+    "build/generated/litert-fp16-fp32-accum-probe/" +
+        "litert-2.1.6-fp16-fp32-accum-probe.aar",
+)
+val fp16Fp32AccumGpuProbeExpectedBytes = 33_633_920L
+val fp16Fp32AccumGpuProbeExpectedSha256 =
+    "2582c44a2a36043d66fc812005fcfae7b85bc71885366245c1a0b2ddd75be29d"
+val fp16Fp32AccumGpuProbeAcceleratorEntry =
+    "jni/arm64-v8a/libLiteRtClGlAccelerator.so"
+val fp16Fp32AccumGpuProbeAcceleratorSha256 =
+    "360192dd650ee085c3ae3a393232a36ea586fe1fb588a2f97888943a3689dc34"
+val fp16Fp32AccumGpuProbeOffset = 0xeb518
+val fp16Fp32AccumGpuProbeInstruction = byteArrayOf(0x2a, 0x00, 0x80.toByte(), 0x52)
 
 require(whisperWorkerCount.get() in 1..2) {
     "whisperWorkerCount must be 1 or 2."
@@ -218,6 +242,9 @@ require(!useStrictMathGpuProbe.get() || includeDecoderSplitDiagnostics.get()) {
     Re-run with both -PuseStrictMathGpuProbe=true and
     -PincludeDecoderSplitDiagnostics=true.
     """.trimIndent()
+}
+require(!(useStrictMathGpuProbe.get() && useFp16Fp32AccumGpuProbe.get())) {
+    "Only one diagnostic LiteRT AAR substitution may be enabled."
 }
 
 android {
@@ -304,6 +331,7 @@ android {
         getByName("main").assets.srcDir(sileroVadAssetRoot)
         if (useFullFloatDecoderProduction.get()) {
             getByName("main").assets.srcDir(fullFloatDecoderProductionAssetRoot)
+            getByName("main").assets.srcDir(parakeetProductionAssetRoot)
         } else {
             getByName("main").assets.srcDir("src/main/generatedAssets")
         }
@@ -434,6 +462,67 @@ tasks.named("preBuild").configure {
     dependsOn(verifyWhisperAssets)
 }
 
+val requiredParakeetAssets = mapOf(
+    "parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite" to (
+        614_261_072L to "334745b8bc7fd372b1c213516f0b6338bb827b1a2abb3e77ad35fe6fea5cd16b"
+        ),
+    "tokenizer.json" to (
+        1_159_960L to "bd321b096832a3f270bd3b2a88823957920f1a5c5ada71114a26ea729d0cbe91"
+        ),
+    "processor_config.json" to (
+        392L to "8346a93a3b987fa1dec57a78f045cd0817d21786589a5a096b41a57a446fd1d7"
+        ),
+    "config.json" to (
+        1_153L to "e747b85e1bdfd300c8b8ac63bac8dd5221f8fe9bc275b48d06c735fcd6971b6e"
+        ),
+)
+
+val verifyParakeetAssets by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned offline Parakeet TDT assets."
+    inputs.files(requiredParakeetAssets.keys.map { parakeetSourceAssetRoot.file(it) })
+
+    doLast {
+        requiredParakeetAssets.forEach { (fileName, expected) ->
+            val (expectedBytes, expectedSha256) = expected
+            val assetFile = parakeetSourceAssetRoot.file(fileName).asFile
+            check(assetFile.isFile) {
+                "Missing Parakeet asset ${assetFile.relativeTo(projectDir)}. " +
+                    "Run scripts/fetch-parakeet-assets.sh."
+            }
+            check(assetFile.length() == expectedBytes) {
+                "$fileName has ${assetFile.length()} bytes; expected $expectedBytes."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            assetFile.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualSha256 == expectedSha256) {
+                "$fileName SHA-256 is $actualSha256; expected $expectedSha256."
+            }
+        }
+    }
+}
+
+val prepareParakeetProductionAssets by tasks.registering(Sync::class) {
+    dependsOn(verifyParakeetAssets)
+    from(parakeetSourceAssetRoot)
+    into(parakeetProductionAssetRoot.map { it.dir("parakeet") })
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifyParakeetAssets)
+    if (useFullFloatDecoderProduction.get()) {
+        dependsOn(prepareParakeetProductionAssets)
+    }
+}
+
 val sileroVadAsset = sileroVadAssetRoot.file("silero/silero_vad.onnx")
 val verifySileroVadAsset by tasks.registering {
     group = "verification"
@@ -560,6 +649,75 @@ val verifyStrictMathGpuProbeAar by tasks.registering {
 tasks.named("preBuild").configure {
     if (useStrictMathGpuProbe.get()) {
         dependsOn(verifyStrictMathGpuProbeAar)
+    }
+}
+
+val verifyFp16Fp32AccumGpuProbeAar by tasks.registering {
+    group = "verification"
+    description =
+        "Verifies the opt-in LiteRT FP16-storage/FP32-accumulator diagnostic AAR."
+    onlyIf { useFp16Fp32AccumGpuProbe.get() }
+    inputs.file(fp16Fp32AccumGpuProbeAar)
+    inputs.property("expectedSha256", fp16Fp32AccumGpuProbeExpectedSha256)
+    inputs.property(
+        "acceleratorSha256",
+        fp16Fp32AccumGpuProbeAcceleratorSha256,
+    )
+
+    doLast {
+        val aarFile = fp16Fp32AccumGpuProbeAar.asFile
+        check(aarFile.isFile) {
+            """
+            Mixed-precision LiteRT diagnostic AAR is missing:
+             - ${aarFile.relativeTo(rootProject.projectDir)}
+
+            Run scripts/prepare-litert-fp16-fp32-accum-gpu-probe.py, then
+            rebuild with -PuseFp16Fp32AccumGpuProbe=true.
+            """.trimIndent()
+        }
+        check(aarFile.length() == fp16Fp32AccumGpuProbeExpectedBytes) {
+            "Mixed-precision probe AAR has ${aarFile.length()} bytes; " +
+                "expected $fp16Fp32AccumGpuProbeExpectedBytes."
+        }
+        fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")
+            .digest(this)
+            .joinToString("") { "%02x".format(it) }
+        val actualAarSha256 = aarFile.readBytes().sha256()
+        check(actualAarSha256 == fp16Fp32AccumGpuProbeExpectedSha256) {
+            "Mixed-precision probe AAR SHA-256 is $actualAarSha256; expected " +
+                "$fp16Fp32AccumGpuProbeExpectedSha256."
+        }
+        ZipFile(aarFile).use { archive ->
+            val entry = checkNotNull(
+                archive.getEntry(fp16Fp32AccumGpuProbeAcceleratorEntry),
+            ) {
+                "Mixed-precision probe AAR is missing " +
+                    fp16Fp32AccumGpuProbeAcceleratorEntry
+            }
+            val accelerator = archive.getInputStream(entry).use { it.readBytes() }
+            check(
+                accelerator.sha256() ==
+                    fp16Fp32AccumGpuProbeAcceleratorSha256,
+            ) {
+                "Mixed-precision accelerator SHA-256 changed."
+            }
+            check(
+                accelerator.copyOfRange(
+                    fp16Fp32AccumGpuProbeOffset,
+                    fp16Fp32AccumGpuProbeOffset +
+                        fp16Fp32AccumGpuProbeInstruction.size,
+                ).contentEquals(fp16Fp32AccumGpuProbeInstruction),
+            ) {
+                "Mixed-precision accelerator does not contain the pinned " +
+                    "`mov w10, #1` instruction."
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    if (useFp16Fp32AccumGpuProbe.get()) {
+        dependsOn(verifyFp16Fp32AccumGpuProbeAar)
     }
 }
 
@@ -1136,11 +1294,19 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
-    if (useStrictMathGpuProbe.get()) {
+    if (useStrictMathGpuProbe.get() || useFp16Fp32AccumGpuProbe.get()) {
         // Diagnostic-only: a generated local copy changes one OpenCL compiler
-        // option byte in the arm64 accelerator. A file dependency has no POM,
-        // so retain LiteRT's public API explicitly.
-        implementation(files(strictMathGpuProbeAar))
+        // option or precision-selection instruction in the arm64 accelerator.
+        // A file dependency has no POM, so retain LiteRT's public API explicitly.
+        implementation(
+            files(
+                if (useFp16Fp32AccumGpuProbe.get()) {
+                    fp16Fp32AccumGpuProbeAar
+                } else {
+                    strictMathGpuProbeAar
+                },
+            ),
+        )
         implementation("com.google.ai.edge.litert:litert-api:2.1.6") {
             exclude(group = "com.google.android.play", module = "ai-delivery")
         }

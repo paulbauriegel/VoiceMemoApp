@@ -70,13 +70,19 @@ data class LongFormTranscript(
 class LongFormTranscriber(
     private val engines: List<WhisperEngine>,
     private val voiceActivityDetector: VoiceActivityDetector? = null,
+    private val lockAutoDetectedLanguage: Boolean = true,
+    private val trimOverlappingTokensAtMillis: Long? = null,
 ) {
     constructor(
         engine: WhisperEngine,
         voiceActivityDetector: VoiceActivityDetector? = null,
+        lockAutoDetectedLanguage: Boolean = true,
+        trimOverlappingTokensAtMillis: Long? = null,
     ) : this(
         engines = listOf(engine),
         voiceActivityDetector = voiceActivityDetector,
+        lockAutoDetectedLanguage = lockAutoDetectedLanguage,
+        trimOverlappingTokensAtMillis = trimOverlappingTokensAtMillis,
     )
 
     init {
@@ -139,7 +145,11 @@ class LongFormTranscriber(
             // Room stores window boundaries in milliseconds, which can round a
             // final partial sample. The durable chunk index is authoritative.
             chunks[index] = completed.copy(window = windows[index])
-            if (forcedLanguage == null && completed.result.detectedLanguage != "und") {
+            if (
+                lockAutoDetectedLanguage &&
+                forcedLanguage == null &&
+                completed.result.detectedLanguage != "und"
+            ) {
                 forcedLanguage = completed.result.detectedLanguage
             }
         }
@@ -150,7 +160,11 @@ class LongFormTranscriber(
         // Automatic language detection must happen before parallel work so every
         // later segment receives the same forced language. Silent leading
         // segments are skipped until the first speech segment establishes it.
-        while (forcedLanguage == null && nextUnfinished < unfinished.size) {
+        while (
+            lockAutoDetectedLanguage &&
+            forcedLanguage == null &&
+            nextUnfinished < unfinished.size
+        ) {
             val window = unfinished[nextUnfinished++]
             val chunk = transcribeWindow(
                 engine = engines.first(),
@@ -172,8 +186,11 @@ class LongFormTranscriber(
 
         val remaining = unfinished.drop(nextUnfinished)
         if (remaining.isNotEmpty()) {
-            val languageForRemaining =
+            val languageForRemaining = if (lockAutoDetectedLanguage) {
                 forcedLanguage?.let(WhisperLanguage::Forced) ?: WhisperLanguage.Auto
+            } else {
+                language
+            }
             if (engines.size == 1 || remaining.size == 1) {
                 for (window in remaining) {
                     val chunk = transcribeWindow(
@@ -214,8 +231,26 @@ class LongFormTranscriber(
         var mergedTokens = emptyList<Int>()
         var mergedText = ""
         for (chunk in orderedChunks) {
-            mergedTokens = TokenOverlapMerger.merge(mergedTokens, chunk.result.tokens)
-            mergedText = TextOverlapMerger.merge(mergedText, chunk.result.text)
+            val result = chunk.result
+            val tokens = if (
+                chunk.window.index > 0 &&
+                trimOverlappingTokensAtMillis != null &&
+                result.timedSegments.size == result.tokens.size
+            ) {
+                result.tokens.filterIndexed { index, _ ->
+                    result.timedSegments[index].startMillis >= trimOverlappingTokensAtMillis
+                }
+            } else {
+                result.tokens
+            }
+            if (trimOverlappingTokensAtMillis == null) {
+                mergedTokens = TokenOverlapMerger.merge(mergedTokens, tokens)
+                mergedText = TextOverlapMerger.merge(mergedText, result.text)
+            } else {
+                mergedTokens = mergedTokens + tokens
+                val decoded = engines.first().decodeTokens(tokens).orEmpty()
+                mergedText = TextConcatenator.concatenate(mergedText, decoded)
+            }
         }
         val containsTimestampTokens = orderedChunks.any { chunk ->
             WhisperTimestampTokens.containsTimestamp(

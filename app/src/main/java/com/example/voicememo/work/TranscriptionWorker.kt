@@ -25,6 +25,7 @@ import com.example.voicememo.data.TranscriptionPhase
 import com.example.voicememo.transcription.AudioChunkWindow
 import com.example.voicememo.transcription.LiteRtWhisperBackendFactory
 import com.example.voicememo.transcription.LiteRtWhisperEngine
+import com.example.voicememo.transcription.LiteRtParakeetEngine
 import com.example.voicememo.transcription.LongFormChunk
 import com.example.voicememo.transcription.LongFormTranscriber
 import com.example.voicememo.transcription.SileroVoiceActivityDetector
@@ -38,6 +39,9 @@ import com.example.voicememo.transcription.WhisperEnginePoolLoader
 import com.example.voicememo.transcription.WhisperFeatureExtractor
 import com.example.voicememo.transcription.WhisperInferenceFingerprint
 import com.example.voicememo.transcription.WhisperLanguage
+import com.example.voicememo.transcription.ParakeetInferenceFingerprint
+import com.example.voicememo.transcription.TranscriptionModel
+import com.example.voicememo.transcription.windowConfig
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +73,7 @@ class TranscriptionWorker(
         var job = repository.getTranscriptionJob(jobId) ?: return Result.failure(
             failureData("UNKNOWN_JOB", "The transcription job no longer exists."),
         )
+        val transcriptionModel = TranscriptionModel.fromId(job.transcriptionModelId)
         val memo = repository.getMemo(memoId) ?: return Result.failure(
             failureData("UNKNOWN_MEMO", "The voice memo no longer exists."),
         )
@@ -76,7 +81,7 @@ class TranscriptionWorker(
 
         if (applicationContext.getSystemService(ActivityManager::class.java).isLowRamDevice) {
             val message =
-                "This device is designated low-RAM by Android and cannot safely load the bundled Whisper model."
+                "This device is designated low-RAM by Android and cannot safely load the bundled transcription models."
             failJob(job, "LOW_RAM_DEVICE", message)
             return Result.failure(failureData("LOW_RAM_DEVICE", message))
         }
@@ -87,14 +92,26 @@ class TranscriptionWorker(
             WhisperBackendRequest.fromGpuAccelerationEnabled(gpuAccelerationEnabled)
         val gpuDecoderMode =
             if (requestedBackend == WhisperBackendRequest.GPU) "gpu" else "disabled"
-        val inferenceFingerprint = WhisperInferenceFingerprint.forConfiguration(
-            requestedBackend = requestedBackend,
-            gpuDecoderMode = gpuDecoderMode,
-            workerCount = BuildConfig.WHISPER_WORKER_COUNT,
-            threadsPerWorker = BuildConfig.WHISPER_THREADS_PER_WORKER,
-            timestampsEnabled = timestampsEnabled,
-            voiceActivityDetectionEnabled = voiceActivityDetectionEnabled,
-        )
+        val workerCount = if (
+            transcriptionModel == TranscriptionModel.PARAKEET_TDT_0_6B_V3
+        ) {
+            1
+        } else {
+            BuildConfig.WHISPER_WORKER_COUNT
+        }
+        val inferenceFingerprint = when (transcriptionModel) {
+            TranscriptionModel.WHISPER_LARGE_V3_TURBO ->
+                WhisperInferenceFingerprint.forConfiguration(
+                    requestedBackend = requestedBackend,
+                    gpuDecoderMode = gpuDecoderMode,
+                    workerCount = workerCount,
+                    threadsPerWorker = BuildConfig.WHISPER_THREADS_PER_WORKER,
+                    timestampsEnabled = timestampsEnabled,
+                    voiceActivityDetectionEnabled = voiceActivityDetectionEnabled,
+                )
+            TranscriptionModel.PARAKEET_TDT_0_6B_V3 ->
+                ParakeetInferenceFingerprint.forConfiguration(requestedBackend)
+        }
 
         try {
             job = updateJob(
@@ -107,7 +124,10 @@ class TranscriptionWorker(
                 ),
             )
             val audioSource = withContext(Dispatchers.IO) {
-                StreamingWavChunkSource.open(File(memo.audioPath))
+                StreamingWavChunkSource.open(
+                    file = File(memo.audioPath),
+                    windowConfig = transcriptionModel.windowConfig(),
+                )
             }
             val transcript = audioSource.use { source ->
                 val windows = List(source.chunkCount, source::window)
@@ -131,7 +151,7 @@ class TranscriptionWorker(
                     audioDurationMillis = source.info.durationMillis,
                     segmentCount = windows.size,
                     precompletedSegmentCount = precompletedSegmentCount,
-                    workerCount = BuildConfig.WHISPER_WORKER_COUNT,
+                    workerCount = workerCount,
                     threadsPerWorker = BuildConfig.WHISPER_THREADS_PER_WORKER,
                 )
                 job = updateJob(
@@ -142,7 +162,6 @@ class TranscriptionWorker(
                         updatedAtMillis = System.currentTimeMillis(),
                     ),
                 )
-                val workerCount = BuildConfig.WHISPER_WORKER_COUNT
                 setForeground(
                     foregroundInfo(
                         text = if (workerCount == 1) {
@@ -166,7 +185,10 @@ class TranscriptionWorker(
                 withContext(Dispatchers.Default) {
                     val engines = mutableListOf<WhisperEngine>()
                     val voiceActivityDetector =
-                        if (voiceActivityDetectionEnabled) {
+                        if (
+                            voiceActivityDetectionEnabled &&
+                            transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO
+                        ) {
                             try {
                                 SileroVoiceActivityDetector.open(applicationContext)
                             } catch (failure: Exception) {
@@ -195,7 +217,30 @@ class TranscriptionWorker(
                             },
                         )
                         engines += WhisperEnginePoolLoader.open(workerCount) {
-                            if (requestedBackend == WhisperBackendRequest.GPU) {
+                            if (
+                                transcriptionModel ==
+                                TranscriptionModel.PARAKEET_TDT_0_6B_V3
+                            ) {
+                                LiteRtParakeetEngine.open(
+                                    context = applicationContext,
+                                    backend = requestedBackend,
+                                ).also {
+                                    benchmark?.backendSelectionChanged(
+                                        if (
+                                            requestedBackend ==
+                                            WhisperBackendRequest.GPU
+                                        ) {
+                                            WhisperBackendSelection.gpuSelected(
+                                                com.example.voicememo.transcription
+                                                    .WhisperRuntimeBackend
+                                                    .GPU_COMPILED_MODEL_AUTO,
+                                            )
+                                        } else {
+                                            WhisperBackendSelection.cpuRequested()
+                                        },
+                                    )
+                                }
+                            } else if (requestedBackend == WhisperBackendRequest.GPU) {
                                 LiteRtWhisperBackendFactory
                                     .openExperimentalGpuWithCpuFallback(
                                         context = applicationContext,
@@ -228,6 +273,18 @@ class TranscriptionWorker(
                         val result = LongFormTranscriber(
                             engines = engines,
                             voiceActivityDetector = voiceActivityDetector,
+                            lockAutoDetectedLanguage =
+                                transcriptionModel ==
+                                    TranscriptionModel.WHISPER_LARGE_V3_TURBO,
+                            trimOverlappingTokensAtMillis =
+                                if (
+                                    transcriptionModel ==
+                                    TranscriptionModel.PARAKEET_TDT_0_6B_V3
+                                ) {
+                                    2_500L
+                                } else {
+                                    null
+                                },
                         ).transcribeBatches(
                             windows = windows,
                             loadAudio = { window ->
@@ -596,6 +653,7 @@ class TranscriptionWorker(
         const val KEY_TIMESTAMPS_ENABLED = "timestamps_enabled"
         const val KEY_VAD_ENABLED = "vad_enabled"
         const val KEY_GPU_ACCELERATION_ENABLED = "gpu_acceleration_enabled"
+        const val KEY_TRANSCRIPTION_MODEL_ID = "transcription_model_id"
         const val PROGRESS_CHUNK = "chunk"
         const val PROGRESS_TOTAL_CHUNKS = "total_chunks"
         const val PROGRESS_TOKEN = "token"

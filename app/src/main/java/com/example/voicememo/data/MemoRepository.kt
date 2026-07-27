@@ -80,6 +80,7 @@ interface MemoRepository {
         memoId: String,
         requestedLanguage: String?,
         totalChunks: Int,
+        transcriptionModelId: String = "whisper-large-v3-turbo",
         createdAtMillis: Long = System.currentTimeMillis(),
     ): TranscriptionJob
 
@@ -335,6 +336,7 @@ class RoomMemoRepository(
         memoId: String,
         requestedLanguage: String?,
         totalChunks: Int,
+        transcriptionModelId: String,
         createdAtMillis: Long,
     ): TranscriptionJob {
         require(totalChunks > 0) { "A transcription job needs at least one chunk." }
@@ -362,6 +364,7 @@ class RoomMemoRepository(
             warning = null,
             createdAtMillis = createdAtMillis,
             updatedAtMillis = createdAtMillis,
+            transcriptionModelId = transcriptionModelId,
         )
         dao.upsertTranscriptionJob(job)
         return job

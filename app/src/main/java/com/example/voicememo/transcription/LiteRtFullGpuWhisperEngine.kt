@@ -582,10 +582,13 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 CompiledModel.GpuOptions.Backend.OPENCL,
             diagnosticBufferStorageType: CompiledModel.GpuOptions.BufferStorageType =
                 CompiledModel.GpuOptions.BufferStorageType.DEFAULT,
+            diagnosticPrecision: CompiledModel.GpuOptions.Precision =
+                CompiledModel.GpuOptions.Precision.FP32,
             diagnosticPreferTextureWeights: Boolean? = null,
             diagnosticBenchmarkMode: Boolean = false,
             diagnosticModelAssets: AssetManager? = null,
             diagnosticModelPath: String? = null,
+            diagnosticModelFilePath: String? = null,
             timestampsEnabled: Boolean = false,
         ): LiteRtFullGpuWhisperEngine {
             require(diagnosticKernelBatchSize == null || diagnosticKernelBatchSize > 0) {
@@ -593,6 +596,12 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             }
             require((diagnosticModelAssets == null) == (diagnosticModelPath == null)) {
                 "Diagnostic model assets and path must be supplied together."
+            }
+            require(
+                diagnosticModelFilePath == null ||
+                    (diagnosticModelAssets == null && diagnosticModelPath == null),
+            ) {
+                "Diagnostic model file and asset overrides are mutually exclusive."
             }
             val applicationContext = context.applicationContext
             val tokenizer = applicationContext.assets.open(WhisperAssets.TOKENIZER).use {
@@ -612,7 +621,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 gpuOptions = CompiledModel.GpuOptions(
                     constantTensorSharing = true,
                     allowSrcQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
-                    precision = CompiledModel.GpuOptions.Precision.FP32,
+                    precision = diagnosticPrecision,
                     backend = diagnosticBackend,
                     bufferStorageType = diagnosticBufferStorageType,
                     preferTextureWeights = diagnosticPreferTextureWeights,
@@ -623,13 +632,13 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                     ),
                 )
             }
-            val modelAssets = diagnosticModelAssets ?: applicationContext.assets
-            val modelPath = diagnosticModelPath ?: WhisperAssets.MODEL
-            val model = CompiledModel.create(
-                modelAssets,
-                modelPath,
-                options,
-            )
+            val model = if (diagnosticModelFilePath != null) {
+                CompiledModel.create(diagnosticModelFilePath, options)
+            } else {
+                val modelAssets = diagnosticModelAssets ?: applicationContext.assets
+                val modelPath = diagnosticModelPath ?: WhisperAssets.MODEL
+                CompiledModel.create(modelAssets, modelPath, options)
+            }
             return try {
                 validateModelContract(model)
                 LiteRtFullGpuWhisperEngine(

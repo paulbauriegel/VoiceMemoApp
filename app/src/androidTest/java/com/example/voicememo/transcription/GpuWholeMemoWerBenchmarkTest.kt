@@ -8,6 +8,7 @@ import android.os.PowerManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.voicememo.VoiceMemoApplication
+import com.google.ai.edge.litert.CompiledModel
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -32,8 +33,30 @@ class GpuWholeMemoWerBenchmarkTest {
         val arguments = InstrumentationRegistry.getArguments()
         val context = instrumentation.targetContext
         val application = context.applicationContext as VoiceMemoApplication
-        val memoId = requireArgument(arguments.getString(ARG_MEMO_ID), ARG_MEMO_ID)
         val runId = requireSafeRunId(arguments.getString(ARG_RUN_ID))
+        val candidateOnly =
+            arguments.getString(ARG_CANDIDATE_ONLY)
+                ?.toBooleanStrictOrNull()
+                ?: false
+        val candidateBackend =
+            arguments.getString(ARG_CANDIDATE_BACKEND) ?: CANDIDATE_BACKEND_GPU
+        require(candidateBackend in setOf(CANDIDATE_BACKEND_GPU, CANDIDATE_BACKEND_CPU)) {
+            "Unsupported candidate backend: $candidateBackend"
+        }
+        val cpuWorkers = arguments.getString(ARG_CPU_WORKERS)?.toIntOrNull() ?: 2
+        val cpuThreads = arguments.getString(ARG_CPU_THREADS)?.toIntOrNull() ?: 3
+        require(cpuWorkers in 1..2) { "CPU workers must be 1 or 2." }
+        require(cpuThreads in 1..8) { "CPU threads must be between 1 and 8." }
+        val externalModelName = arguments.getString(ARG_EXTERNAL_MODEL_NAME)
+        val externalModelSha256 = arguments.getString(ARG_EXTERNAL_MODEL_SHA256)
+        val externalAudioName = arguments.getString(ARG_EXTERNAL_AUDIO_NAME)
+        val forcedLanguage = arguments.getString(ARG_FORCED_LANGUAGE)
+        val gpuPrecisionName = arguments.getString(ARG_GPU_PRECISION) ?: GPU_PRECISION_FP32
+        val gpuPrecision = when (gpuPrecisionName) {
+            GPU_PRECISION_FP32 -> CompiledModel.GpuOptions.Precision.FP32
+            GPU_PRECISION_FP16_FP32_ACCUM -> CompiledModel.GpuOptions.Precision.FP16
+            else -> error("Unsupported GPU precision mode: $gpuPrecisionName")
+        }
         val useFullFloatDecoder =
             arguments.getString(ARG_USE_FULL_FLOAT_DECODER)
                 ?.toBooleanStrictOrNull()
@@ -45,20 +68,63 @@ class GpuWholeMemoWerBenchmarkTest {
         require(!promotionGate || useFullFloatDecoder) {
             "The GPU promotion gate requires the complete FLOAT32 decoder model."
         }
-        val gpuModelOverride = if (useFullFloatDecoder) {
-            GpuModelOverride(
+        require(!candidateOnly || externalModelName != null) {
+            "Candidate-only mode requires an external model."
+        }
+        require((externalModelName == null) == (externalModelSha256 == null)) {
+            "External model name and SHA-256 must be supplied together."
+        }
+        require(
+            externalModelSha256 == null ||
+                SAFE_SHA256.matches(externalModelSha256),
+        ) {
+            "External model SHA-256 is invalid."
+        }
+        require(!candidateOnly || externalAudioName != null) {
+            "Candidate-only mode requires an external audio file."
+        }
+        require(!candidateOnly || !promotionGate) {
+            "Candidate-only mode does not use the existing promotion gate."
+        }
+        val gpuModelOverride = when {
+            externalModelName != null -> GpuModelOverride(
+                filePath = requireStagedFile(
+                    context = context,
+                    directory = EXTERNAL_MODEL_DIRECTORY,
+                    name = externalModelName,
+                    extension = ".tflite",
+                ).absolutePath,
+            )
+            useFullFloatDecoder -> GpuModelOverride(
                 assets = instrumentation.context.assets,
-                path = FULL_FLOAT_DECODER_ASSET,
+                assetPath = FULL_FLOAT_DECODER_ASSET,
+            )
+            else -> null
+        }
+        val memoId = arguments.getString(ARG_MEMO_ID)
+        val audioFile = if (externalAudioName != null) {
+            requireStagedFile(
+                context = context,
+                directory = EXTERNAL_AUDIO_DIRECTORY,
+                name = externalAudioName,
+                extension = ".wav",
             )
         } else {
-            null
+            val requiredMemoId = requireArgument(memoId, ARG_MEMO_ID)
+            val memo = requireNotNull(
+                application.container.memoRepository.getMemo(requiredMemoId),
+            ) {
+                "Unknown memo $requiredMemoId."
+            }
+            require(!memo.pendingDeletion) { "Memo $requiredMemoId is pending deletion." }
+            File(memo.audioPath).also {
+                require(it.isFile) { "Memo audio is missing." }
+            }
         }
-        val memo = requireNotNull(application.container.memoRepository.getMemo(memoId)) {
-            "Unknown memo $memoId."
-        }
-        require(!memo.pendingDeletion) { "Memo $memoId is pending deletion." }
-        val audioFile = File(memo.audioPath)
-        require(audioFile.isFile) { "Memo audio is missing." }
+        val requestedLanguage = forcedLanguage?.let {
+            require(SAFE_LANGUAGE.matches(it)) { "Invalid forced language." }
+            WhisperLanguage.Forced(it)
+        } ?: WhisperLanguage.Auto
 
         val reportDirectory = File(context.cacheDir, REPORT_DIRECTORY).apply { mkdirs() }
         val reportFile = File(reportDirectory, "whole-$runId.json")
@@ -68,12 +134,22 @@ class GpuWholeMemoWerBenchmarkTest {
 
         val report = JSONObject()
             .put("run_id", runId)
-            .put("memo_id", memoId)
-            .put("memo_duration_millis", memo.durationMillis)
+            .put("memo_id", memoId ?: JSONObject.NULL)
+            .put("audio_file_name", externalAudioName ?: JSONObject.NULL)
             .put("persisted_output", false)
+            .put("candidate_only", candidateOnly)
+            .put("candidate_backend", candidateBackend)
+            .put("cpu_workers", cpuWorkers)
+            .put("cpu_threads_per_worker", cpuThreads)
             .put("use_full_float_decoder", useFullFloatDecoder)
             .put("promotion_gate", promotionGate)
-            .put("model_sha256", WhisperAssets.MODEL_SHA256)
+            .put("external_model_name", externalModelName ?: JSONObject.NULL)
+            .put("requested_language", forcedLanguage ?: "auto")
+            .put("gpu_precision", gpuPrecisionName)
+            .put(
+                "model_sha256",
+                externalModelSha256 ?: WhisperAssets.MODEL_SHA256,
+            )
             .put("status", STATUS_RUNNING)
         fun publishCheckpoint() {
             temporaryReport.writeText(report.toString(2))
@@ -92,6 +168,47 @@ class GpuWholeMemoWerBenchmarkTest {
                     .put("chunk_count", source.chunkCount)
             }
             report.put("audio", audioInfo)
+
+            if (candidateOnly) {
+                val externalModelPath = requireNotNull(gpuModelOverride?.filePath)
+                val candidate = benchmarkWithEngines(
+                    context = context,
+                    audioFile = audioFile,
+                    mode = when {
+                        candidateBackend == CANDIDATE_BACKEND_CPU && cpuWorkers == 1 ->
+                            Mode.CPU_1X3
+                        candidateBackend == CANDIDATE_BACKEND_CPU -> Mode.CPU_2X3
+                        gpuPrecisionName == GPU_PRECISION_FP16_FP32_ACCUM ->
+                            Mode.FULL_GPU_FP16_FP32_ACCUM_NO_SOURCE_QUANT
+                        else -> Mode.FULL_GPU_NO_SOURCE_QUANT
+                    },
+                    language = requestedLanguage,
+                    openEngines = {
+                        if (candidateBackend == CANDIDATE_BACKEND_CPU) {
+                            openCpuEngines(
+                                context = context,
+                                workerCount = cpuWorkers,
+                                threadCount = cpuThreads,
+                                modelFilePath = externalModelPath,
+                            )
+                        } else {
+                            listOf(
+                                LiteRtFullGpuWhisperEngine.open(
+                                    context = context,
+                                    allowSourceQuantizedFcConvOps = false,
+                                    diagnosticPrecision = gpuPrecision,
+                                    diagnosticModelFilePath = externalModelPath,
+                                ),
+                            )
+                        }
+                    },
+                )
+                report
+                    .put("candidate", candidate.toJson(referenceText = null))
+                    .put("status", STATUS_COMPLETED)
+                publishCheckpoint()
+                return@runBlocking
+            }
 
             val cpu = benchmarkWithEngines(
                 context = context,
@@ -134,7 +251,8 @@ class GpuWholeMemoWerBenchmarkTest {
                                 LiteRtFullGpuWhisperEngine.open(
                                     context = context,
                                     diagnosticModelAssets = gpuModelOverride?.assets,
-                                    diagnosticModelPath = gpuModelOverride?.path,
+                                    diagnosticModelPath = gpuModelOverride?.assetPath,
+                                    diagnosticModelFilePath = gpuModelOverride?.filePath,
                                 ),
                             )
                         },
@@ -155,7 +273,8 @@ class GpuWholeMemoWerBenchmarkTest {
                                 context = context,
                                 allowSourceQuantizedFcConvOps = false,
                                 diagnosticModelAssets = gpuModelOverride?.assets,
-                                diagnosticModelPath = gpuModelOverride?.path,
+                                diagnosticModelPath = gpuModelOverride?.assetPath,
+                                diagnosticModelFilePath = gpuModelOverride?.filePath,
                             ),
                         )
                     },
@@ -230,7 +349,8 @@ class GpuWholeMemoWerBenchmarkTest {
                                 context = context,
                                 strictGpuOnly = true,
                                 diagnosticModelAssets = gpuModelOverride?.assets,
-                                diagnosticModelPath = gpuModelOverride?.path,
+                                diagnosticModelPath = gpuModelOverride?.assetPath,
+                                diagnosticModelFilePath = gpuModelOverride?.filePath,
                             ),
                         )
                     },
@@ -320,11 +440,34 @@ class GpuWholeMemoWerBenchmarkTest {
                 context = context,
                 allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
                 diagnosticModelAssets = gpuModelOverride?.assets,
-                diagnosticModelPath = gpuModelOverride?.path,
+                diagnosticModelPath = gpuModelOverride?.assetPath,
+                diagnosticModelFilePath = gpuModelOverride?.filePath,
             )
             return CpuEncoderGpuDecoderEngine(cpu = cpu, gpu = gpu)
         } catch (error: Throwable) {
             cpu.close()
+            throw error
+        }
+    }
+
+    private fun openCpuEngines(
+        context: Context,
+        workerCount: Int,
+        threadCount: Int,
+        modelFilePath: String,
+    ): List<WhisperEngine> {
+        val engines = mutableListOf<WhisperEngine>()
+        try {
+            repeat(workerCount) {
+                engines += LiteRtWhisperEngine.open(
+                    context = context,
+                    threadCount = threadCount,
+                    diagnosticModelFilePath = modelFilePath,
+                )
+            }
+            return engines
+        } catch (error: Throwable) {
+            engines.asReversed().forEach { engine -> runCatching(engine::close) }
             throw error
         }
     }
@@ -380,6 +523,7 @@ class GpuWholeMemoWerBenchmarkTest {
                 .put("total_wall_millis", totalWallMillis)
                 .put("detected_language", transcript.detectedLanguage)
                 .put("text", transcript.text)
+                .put("tokens", JSONArray(transcript.tokens))
                 .put("token_count", transcript.tokens.size)
                 .put("word_count", normalizedWords(transcript.text).size)
                 .put("warnings", JSONArray(transcript.warnings))
@@ -394,6 +538,7 @@ class GpuWholeMemoWerBenchmarkTest {
                                     .put("start_sample", chunk.window.startSample)
                                     .put("end_sample", chunk.window.endSample)
                                     .put("token_count", chunk.result.tokens.size)
+                                    .put("tokens", JSONArray(chunk.result.tokens))
                                     .put(
                                         "inference_millis",
                                         chunk.result.inferenceMillis,
@@ -442,6 +587,14 @@ class GpuWholeMemoWerBenchmarkTest {
             tokenSelection = "CPU",
             neuralModelStrictlyGpuOnly = false,
         ),
+        CPU_1X3(
+            id = "cpu-1x3",
+            frontend = "CPU",
+            encoder = "CPU_XNNPACK",
+            decoder = "CPU_XNNPACK",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
         FULL_GPU_DOMINANT(
             id = "gpu-encoder-gpu-decoder",
             frontend = "CPU",
@@ -455,6 +608,14 @@ class GpuWholeMemoWerBenchmarkTest {
             frontend = "CPU",
             encoder = "GPU_OPENCL_FP32_NO_SOURCE_QUANT",
             decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER_NO_SOURCE_QUANT",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        FULL_GPU_FP16_FP32_ACCUM_NO_SOURCE_QUANT(
+            id = "gpu-fp16-storage-fp32-accum-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_F32_F16_NO_SOURCE_QUANT",
+            decoder = "GPU_OPENCL_F32_F16_WITH_CPU_GATHER_NO_SOURCE_QUANT",
             tokenSelection = "CPU",
             neuralModelStrictlyGpuOnly = false,
         ),
@@ -534,23 +695,59 @@ class GpuWholeMemoWerBenchmarkTest {
     )
 
     private data class GpuModelOverride(
-        val assets: AssetManager,
-        val path: String,
+        val assets: AssetManager? = null,
+        val assetPath: String? = null,
+        val filePath: String? = null,
     )
 
     companion object {
         private const val ARG_MEMO_ID = "memoId"
         private const val ARG_RUN_ID = "runId"
+        private const val ARG_CANDIDATE_ONLY = "candidateOnly"
+        private const val ARG_CANDIDATE_BACKEND = "candidateBackend"
+        private const val ARG_CPU_WORKERS = "cpuWorkers"
+        private const val ARG_CPU_THREADS = "cpuThreads"
+        private const val ARG_EXTERNAL_MODEL_NAME = "externalModelName"
+        private const val ARG_EXTERNAL_MODEL_SHA256 = "externalModelSha256"
+        private const val ARG_EXTERNAL_AUDIO_NAME = "externalAudioName"
+        private const val ARG_FORCED_LANGUAGE = "forcedLanguage"
+        private const val ARG_GPU_PRECISION = "gpuPrecision"
         private const val ARG_USE_FULL_FLOAT_DECODER = "useFullFloatDecoder"
         private const val ARG_PROMOTION_GATE = "promotionGate"
         private const val FULL_FLOAT_DECODER_ASSET =
             "whisper-full-float-decoder/decoder.tflite"
         private const val REPORT_DIRECTORY = "gpu-wer"
+        private const val EXTERNAL_MODEL_DIRECTORY = "gpu-models"
+        private const val EXTERNAL_AUDIO_DIRECTORY = "gpu-audio"
         private const val STATUS_RUNNING = "running"
         private const val STATUS_COMPLETED = "completed"
         private const val STATUS_FAILED = "failed"
+        private const val GPU_PRECISION_FP32 = "fp32"
+        private const val GPU_PRECISION_FP16_FP32_ACCUM = "fp16-fp32-accum"
+        private const val CANDIDATE_BACKEND_GPU = "gpu"
+        private const val CANDIDATE_BACKEND_CPU = "cpu"
         private val WORD_PATTERN =
             Regex("""[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*""")
+        private val SAFE_FILE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,127}""")
+        private val SAFE_LANGUAGE = Regex("""[a-z]{2,3}""")
+        private val SAFE_SHA256 = Regex("""[0-9a-f]{64}""")
+
+        private fun requireStagedFile(
+            context: Context,
+            directory: String,
+            name: String,
+            extension: String,
+        ): File {
+            require(SAFE_FILE_NAME.matches(name) && name.endsWith(extension)) {
+                "Invalid staged file name."
+            }
+            val parent = File(context.filesDir, directory).canonicalFile
+            val file = File(parent, name).canonicalFile
+            require(file.parentFile == parent && file.isFile) {
+                "Staged file is missing."
+            }
+            return file
+        }
 
         private fun wordError(reference: String, candidate: String): WordError {
             val expected = normalizedWords(reference)

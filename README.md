@@ -5,9 +5,10 @@ transcribing voice notes entirely on the device. It has no `INTERNET`
 permission, cloud account, analytics SDK, or automatic cloud backup. Manual
 backup export and restore remain entirely user initiated.
 
-## Offline model
+## Offline models
 
-The APK bundles the arm64 LiteRT model and tokenizer:
+The APK bundles two selectable arm64 LiteRT transcription models. Whisper
+remains the default and existing baseline:
 
 - Repository: `litert-community/whisper-large-v3-turbo`
 - Revision: `4e3af6a1597a54b6e47d2899cf4f6c39932b0b7e`
@@ -26,14 +27,31 @@ Fetch and verify the pinned development assets before building:
 
 ```sh
 scripts/fetch-whisper-assets.sh
+scripts/fetch-parakeet-assets.sh
 scripts/fetch-silero-vad-assets.sh
 ```
 
 The generated files live under
-`app/src/main/generatedAssets/whisper/` and are intentionally ignored by Git.
+`app/src/main/generatedAssets/{whisper,parakeet}/` and are intentionally
+ignored by Git.
 The Android build independently checks every required file's exact size and
 SHA-256. The `.tflite` entry is packaged without compression so LiteRT can
 memory-map it from the standalone APK.
+
+Parakeet uses the stateful five-second INT8 LiteRT graph:
+
+- Conversion repository: `litert-community/parakeet-tdt-0.6b-v3`
+- Conversion revision: `e3a6f2dec6800733f97c87ff55822f32c405983a`
+- Upstream/tokenizer revision: `7c35754d166cca382ad1e53e68b01e7c575f3a1d`
+- Model: `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite`
+- Size: `614261072` bytes
+- SHA-256:
+  `334745b8bc7fd372b1c213516f0b6338bb827b1a2abb3e77ad35fe6fea5cd16b`
+
+Its frontend and stateful TDT decoder follow Google's LiteRT speech-recognition
+sample. Long memos use five-second windows with 50% overlap. CPU and GPU use
+the same graph; GPU requests FP32 arithmetic and constant-tensor sharing with
+CPU fallback for unsupported operations.
 
 Voice activity detection uses the separately bundled Silero VAD v6.2.1 ONNX
 model pinned at revision `7e30209a3e901f9842f81b225f3e93d8199902b1`
@@ -54,10 +72,40 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-The app packages only `arm64-v8a`. Because the model is bundled, expect the
-standalone sideload APK to exceed 1.09 GB.
+The app packages only `arm64-v8a`. Both models are bundled, so the standalone
+sideload APK is large.
 
 ## Transcription benchmarks
+
+Run the read-only Parakeet comparison against the existing Whisper CPU
+baseline for an existing memo:
+
+```sh
+scripts/run-parakeet-whisper-benchmark.sh --memo-id MEMO_ID
+```
+
+The harness runs Whisper CPU, Parakeet CPU, and Parakeet GPU against the same
+audio, reporting load/inference time, Parakeet WER versus Whisper, and
+Parakeet GPU-versus-CPU WER. It installs both APKs with `adb install -r` and
+does not create, replace, or delete recordings or transcript rows.
+
+Qwen3-ASR is kept benchmark-only rather than bundled into the production APK.
+Provide the saved Whisper baseline as a UTF-8 text file:
+
+```sh
+scripts/run-qwen-whisper-benchmark.sh \
+  --memo-id MEMO_ID \
+  --whisper-reference whisper-reference.txt \
+  --backends cpu,gpu
+```
+
+The runner fetches and verifies the pinned
+`litert-community/Qwen3-ASR-0.6B` five-second INT8 graph and Qwen tokenizer,
+updates only the test APK in place, stages the model in app cache for the run,
+and removes the temporary device copies afterward. Reports are written under
+`build/reports/qwen-benchmark/`. Qwen long-form decoding uses 50%-overlapped
+five-second windows and a fuzzy word-boundary merger because this graph does
+not expose token timestamps.
 
 The default build uses two parallel Whisper interpreters with three
 CPU/XNNPACK threads each. It does not create a GPU delegate. Every
@@ -243,6 +291,47 @@ scripts/run-gpu-parity-diagnostic.sh whole \
 The promotion is evidence for the tested Pixel 7 Pro and German memos, not a
 claim of exact multilingual token parity. Continue expanding the fixture/memo
 corpus before treating the GPU transcript as a universal CPU oracle.
+
+### Original-model FP16 Android GPU experiment
+
+`scripts/run-original-fp16-gpu-experiment.py` provides a fail-closed,
+developer-only comparison against the pinned original OpenAI
+`whisper-large-v3-turbo` revision
+`41f01f3fe87f28c78e2fbf8b568835947dd65ed9`. It:
+
+1. runs the original PyTorch checkpoint on the host CPU in FLOAT32;
+2. exports fixed `encode` and `decode` signatures;
+3. converts constants to FLOAT16 while retaining FLOAT32
+   inputs, activations, and outputs;
+4. applies the explicit attention-key transpose and causal-mask rank-barrier
+   fixes, with SHA-256 verification between every artifact; and
+5. streams the candidate and WAV into app-private diagnostic directories,
+   runs the whole-memo Android GPU benchmark, and reports text, tokens, WER,
+   token error rate, timing, and memory.
+
+Use Python 3.11 and allow at least 18 GiB of free disk space:
+
+```sh
+python3.11 -m venv build/venvs/original-fp16
+build/venvs/original-fp16/bin/pip install \
+  -r scripts/requirements-original-fp16.txt
+build/venvs/original-fp16/bin/python \
+  scripts/run-original-fp16-gpu-experiment.py all \
+  --memo-id latest \
+  --language de \
+  --serial DEVICE_SERIAL
+```
+
+For inspection or recovery, the same script exposes `baseline`, `convert`,
+`rewrite`, and `device` stages. `--local-files-only` prevents Hugging Face
+downloads when the pinned checkpoint is already cached. `--skip-build` reuses
+existing debug benchmark APKs. Pass `--audio /absolute/path/to/memo.wav`
+instead of `--memo-id latest` to use a host PCM16 WAV.
+
+The experiment never edits the bundled production asset. Android deployment
+uses `adb install -r`; it never uninstalls VoiceMemo or clears app data.
+Staged candidate files are removed after the run, while the host-side models
+and JSON reports remain under `build/experiments/original-fp16`.
 
 ### Decoder-split diagnostic artifacts
 

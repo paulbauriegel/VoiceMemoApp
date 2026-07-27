@@ -69,10 +69,11 @@ class StreamingWavChunkSource private constructor(
     private val input: RandomAccessFile,
     private val format: WavFormat,
     private val dataOffset: Long,
+    private val windowConfig: TranscriptionWindowConfig,
     val info: StreamingWavInfo,
 ) : Closeable {
     val chunkCount: Int =
-        windowCount(info.whisperSampleCount)
+        windowCount(info.whisperSampleCount, windowConfig)
 
     private val kernelBank: SincKernelBank? =
         if (format.sampleRate == TARGET_SAMPLE_RATE) null else SincKernelBank(format.sampleRate)
@@ -117,7 +118,7 @@ class StreamingWavChunkSource private constructor(
                 )
             }
             outputOffset += batchSize
-            val completedBefore = index.toLong() * WhisperChunker.PAYLOAD_SAMPLES
+            val completedBefore = index.toLong() * windowConfig.payloadSamples
             onProgress(
                 StreamingWavProgress(
                     chunkIndex = index,
@@ -151,9 +152,9 @@ class StreamingWavChunkSource private constructor(
 
     fun window(index: Int): AudioChunkWindow {
         require(index in 0 until chunkCount) { "Invalid chunk index $index of $chunkCount." }
-        val start = index.toLong() * WhisperChunker.STRIDE_SAMPLES
+        val start = index.toLong() * windowConfig.strideSamples
         val end = minOf(
-            start + WhisperChunker.PAYLOAD_SAMPLES,
+            start + windowConfig.payloadSamples,
             info.whisperSampleCount.toLong(),
         )
         return AudioChunkWindow(index, start.toInt(), end.toInt())
@@ -274,7 +275,7 @@ class StreamingWavChunkSource private constructor(
 
     private fun totalWorkSamples(): Long {
         if (chunkCount == 0) return 0L
-        return (chunkCount - 1L) * WhisperChunker.PAYLOAD_SAMPLES +
+        return (chunkCount - 1L) * windowConfig.payloadSamples +
             window(chunkCount - 1).sampleCount
     }
 
@@ -285,7 +286,11 @@ class StreamingWavChunkSource private constructor(
         private const val OUTPUT_BATCH_SAMPLES = 4_096
         private const val MIN_WEIGHT = 1.0e-12
 
-        fun open(file: File): StreamingWavChunkSource {
+        fun open(
+            file: File,
+            windowConfig: TranscriptionWindowConfig =
+                TranscriptionModel.DEFAULT.windowConfig(),
+        ): StreamingWavChunkSource {
             val input = RandomAccessFile(file, "r")
             try {
                 val parsed = parseHeader(input, file.name)
@@ -304,6 +309,7 @@ class StreamingWavChunkSource private constructor(
                     input = input,
                     format = parsed.format,
                     dataOffset = parsed.dataOffset,
+                    windowConfig = windowConfig,
                     info = info,
                 )
             } catch (throwable: Throwable) {
@@ -312,14 +318,17 @@ class StreamingWavChunkSource private constructor(
             }
         }
 
-        private fun windowCount(sampleCount: Int): Int {
+        private fun windowCount(
+            sampleCount: Int,
+            windowConfig: TranscriptionWindowConfig,
+        ): Int {
             if (sampleCount == 0) return 0
-            if (sampleCount <= WhisperChunker.PAYLOAD_SAMPLES) return 1
-            val remainingAfterFirst = sampleCount - WhisperChunker.PAYLOAD_SAMPLES.toLong()
+            if (sampleCount <= windowConfig.payloadSamples) return 1
+            val remainingAfterFirst = sampleCount - windowConfig.payloadSamples.toLong()
             return 1 +
                 (
-                    (remainingAfterFirst + WhisperChunker.STRIDE_SAMPLES - 1L) /
-                        WhisperChunker.STRIDE_SAMPLES
+                    (remainingAfterFirst + windowConfig.strideSamples - 1L) /
+                        windowConfig.strideSamples
                     ).toInt()
         }
 

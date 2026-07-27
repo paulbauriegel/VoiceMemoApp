@@ -148,6 +148,8 @@ data class TranscriptionJob(
     val inferenceFingerprint: String? = null,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
+    /** Stable model ID captured when the job is queued. */
+    val transcriptionModelId: String = "whisper-large-v3-turbo",
 )
 
 @Entity(

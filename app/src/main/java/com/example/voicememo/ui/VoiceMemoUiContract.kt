@@ -19,6 +19,7 @@ data class VoiceMemoAppUiState(
     val transcriptionTimestampsEnabled: Boolean = false,
     val voiceActivityDetectionEnabled: Boolean = true,
     val gpuAccelerationEnabled: Boolean = true,
+    val transcriptionModelId: String = "whisper-large-v3-turbo",
     val recorder: RecorderUiState = RecorderUiState(),
     val detail: VoiceMemoDetailUi? = null,
     val modelAvailability: ModelAvailabilityUiState = ModelAvailabilityUiState(),
@@ -211,6 +212,7 @@ sealed interface VoiceMemoUiAction {
     data class TranscriptionTimestampsChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class VoiceActivityDetectionChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class GpuAccelerationChanged(val enabled: Boolean) : VoiceMemoUiAction
+    data class TranscriptionModelChanged(val modelId: String) : VoiceMemoUiAction
 
     object BeginTitleEdit : VoiceMemoUiAction
     data class TitleDraftChanged(val title: String) : VoiceMemoUiAction

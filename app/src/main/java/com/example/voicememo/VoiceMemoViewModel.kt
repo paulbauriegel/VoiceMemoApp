@@ -40,6 +40,7 @@ import com.example.voicememo.ui.VoiceMemoListItemUi
 import com.example.voicememo.ui.VoiceMemoUiAction
 import com.example.voicememo.transcription.SileroVoiceActivityDetector
 import com.example.voicememo.transcription.WhisperAssets
+import com.example.voicememo.transcription.ParakeetAssets
 import com.example.voicememo.transcription.WhisperTimestampTokens
 import com.example.voicememo.transcription.WhisperTokenizer
 import java.io.File
@@ -90,6 +91,8 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled =
                 container.transcriptionPreferences.gpuAccelerationEnabled,
+            transcriptionModelId =
+                container.transcriptionPreferences.transcriptionModelId,
         ),
     )
     private val waveformCache = ConcurrentHashMap<WaveformCacheKey, List<Float>>()
@@ -106,6 +109,24 @@ class VoiceMemoViewModel(
                     .bufferedReader()
                     .use { it.readText() },
                 sourceUrl = "https://huggingface.co/litert-community/whisper-large-v3-turbo",
+            ),
+            LicenseUi(
+                name = "NVIDIA Parakeet TDT 0.6B v3",
+                version = ParakeetAssets.TOKENIZER_REVISION.take(8),
+                licenseName = "Creative Commons Attribution 4.0",
+                notice =
+                    "Model weights and tokenizer from NVIDIA. Attribution: NVIDIA " +
+                        "Parakeet TDT 0.6B v3.",
+                sourceUrl = "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+            ),
+            LicenseUi(
+                name = "LiteRT Parakeet conversion",
+                version = ParakeetAssets.MODEL_REVISION.take(8),
+                licenseName = "Apache License 2.0",
+                notice = resources.openRawResource(R.raw.litert_apache_2_0)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3",
             ),
             LicenseUi(
                 name = "Google LiteRT",
@@ -210,6 +231,7 @@ class VoiceMemoViewModel(
             transcriptionTimestampsEnabled = local.transcriptionTimestampsEnabled,
             voiceActivityDetectionEnabled = local.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled = local.gpuAccelerationEnabled,
+            transcriptionModelId = local.transcriptionModelId,
             recorder = recorder.toUi(),
             detail = memoDetail?.toUi(playback, local),
             modelAvailability = modelAvailability(),
@@ -229,6 +251,8 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled =
                 container.transcriptionPreferences.gpuAccelerationEnabled,
+            transcriptionModelId =
+                container.transcriptionPreferences.transcriptionModelId,
         ),
     )
 
@@ -438,6 +462,13 @@ class VoiceMemoViewModel(
                 presentation.update {
                     it.copy(gpuAccelerationEnabled = action.enabled)
                 }
+            }
+
+            is VoiceMemoUiAction.TranscriptionModelChanged -> {
+                val modelId = com.example.voicememo.transcription.TranscriptionModel
+                    .fromId(action.modelId).id
+                container.transcriptionPreferences.transcriptionModelId = modelId
+                presentation.update { it.copy(transcriptionModelId = modelId) }
             }
 
             VoiceMemoUiAction.BeginTitleEdit -> presentation.update { local ->
@@ -810,6 +841,8 @@ class VoiceMemoViewModel(
                         presentation.value.voiceActivityDetectionEnabled,
                     gpuAccelerationEnabled =
                         presentation.value.gpuAccelerationEnabled,
+                    transcriptionModelId =
+                        presentation.value.transcriptionModelId,
                 )
             }.onFailure {
                 mutableEffects.emitMessage(it.message ?: "Transcription could not be queued.")
@@ -1089,10 +1122,15 @@ class VoiceMemoViewModel(
             app.assets.openFd(WhisperAssets.MODEL).use { descriptor ->
                 check(descriptor.declaredLength == WhisperAssets.MODEL_SIZE_BYTES)
             }
+            app.assets.openFd(ParakeetAssets.MODEL).use { descriptor ->
+                check(descriptor.declaredLength == ParakeetAssets.MODEL_SIZE_BYTES)
+            }
             ModelAvailabilityUiState(
                 phase = ModelAvailabilityPhase.Available,
                 headline = "Local transcription ready",
-                supportingText = "Whisper large-v3 Turbo is bundled and runs entirely on this device.",
+                supportingText =
+                    "Whisper Large v3 Turbo and Parakeet TDT 0.6B v3 are bundled and " +
+                        "run entirely on this device.",
             )
         }.getOrElse { error ->
             ModelAvailabilityUiState(
@@ -1151,6 +1189,7 @@ class VoiceMemoViewModel(
         val transcriptionTimestampsEnabled: Boolean = false,
         val voiceActivityDetectionEnabled: Boolean = true,
         val gpuAccelerationEnabled: Boolean = true,
+        val transcriptionModelId: String = "whisper-large-v3-turbo",
     ) {
         fun isBackupBusy(): Boolean =
             isExportingBackup ||

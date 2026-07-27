@@ -544,6 +544,7 @@ class LiteRtWhisperEngine private constructor(
             context: Context,
             threadCount: Int = DEFAULT_THREAD_COUNT,
             timestampsEnabled: Boolean = false,
+            diagnosticModelFilePath: String? = null,
         ): LiteRtWhisperEngine {
             require(threadCount > 0) { "LiteRT thread count must be positive." }
             val applicationContext = context.applicationContext
@@ -555,7 +556,11 @@ class LiteRtWhisperEngine private constructor(
             }
             validateConfig(config)
 
-            val mappedModel = mapModelAsset(applicationContext)
+            val mappedModel = if (diagnosticModelFilePath != null) {
+                mapModelFile(diagnosticModelFilePath)
+            } else {
+                mapModelAsset(applicationContext)
+            }
             val options = Interpreter.Options()
                 .setNumThreads(threadCount)
                 .setUseXNNPACK(true)
@@ -610,6 +615,18 @@ class LiteRtWhisperEngine private constructor(
                         descriptor.declaredLength,
                     )
                 }
+            }
+        }
+
+        private fun mapModelFile(path: String): MappedByteBuffer {
+            val file = java.io.File(path)
+            require(file.isFile) { "Diagnostic Whisper model is missing." }
+            return FileInputStream(file).channel.use { channel ->
+                channel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    0L,
+                    channel.size(),
+                )
             }
         }
 

@@ -7,6 +7,7 @@ import androidx.work.WorkManager
 import com.example.voicememo.data.MemoRepository
 import com.example.voicememo.data.TranscriptionJobStatus
 import com.example.voicememo.data.TranscriptionPhase
+import com.example.voicememo.transcription.TranscriptionModel
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,6 +19,7 @@ interface TranscriptionCoordinator {
         timestampsEnabled: Boolean = false,
         voiceActivityDetectionEnabled: Boolean = true,
         gpuAccelerationEnabled: Boolean = true,
+        transcriptionModelId: String = TranscriptionModel.DEFAULT.id,
     ): String
     suspend fun cancel(memoId: String, jobId: String?)
 }
@@ -32,6 +34,7 @@ class WorkManagerTranscriptionCoordinator(
         timestampsEnabled: Boolean,
         voiceActivityDetectionEnabled: Boolean,
         gpuAccelerationEnabled: Boolean,
+        transcriptionModelId: String,
     ): String {
         val normalizedLanguage = languageCode?.takeUnless { it == "auto" }
         val job = repository.createTranscriptionJob(
@@ -39,6 +42,7 @@ class WorkManagerTranscriptionCoordinator(
             requestedLanguage = normalizedLanguage,
             // The worker replaces this placeholder after reading the WAV header.
             totalChunks = 1,
+            transcriptionModelId = TranscriptionModel.fromId(transcriptionModelId).id,
         )
         val request = OneTimeWorkRequestBuilder<TranscriptionWorker>()
             .setInputData(
@@ -56,6 +60,10 @@ class WorkManagerTranscriptionCoordinator(
                     .putBoolean(
                         TranscriptionWorker.KEY_GPU_ACCELERATION_ENABLED,
                         gpuAccelerationEnabled,
+                    )
+                    .putString(
+                        TranscriptionWorker.KEY_TRANSCRIPTION_MODEL_ID,
+                        job.transcriptionModelId,
                     )
                     .build(),
             )

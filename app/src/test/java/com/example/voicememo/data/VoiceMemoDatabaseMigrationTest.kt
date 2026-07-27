@@ -35,6 +35,32 @@ class VoiceMemoDatabaseMigrationTest {
         assertFalse(normalizedSql.contains("NOT NULL"))
     }
 
+    @Test
+    fun migrationTwoToThreeAddsNonNullWhisperDefaultWithoutDeletingData() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_2_3.migrate(database)
+
+        assertEquals(
+            listOf(
+                "ALTER TABLE transcription_jobs " +
+                    "ADD COLUMN transcriptionModelId TEXT NOT NULL " +
+                    "DEFAULT 'whisper-large-v3-turbo'",
+            ),
+            executedSql,
+        )
+        val normalizedSql = executedSql.single().uppercase()
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+    }
+
     private fun defaultValue(type: Class<*>): Any? = when (type) {
         java.lang.Boolean.TYPE -> false
         java.lang.Byte.TYPE -> 0.toByte()

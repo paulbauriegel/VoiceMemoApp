@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TranscriptionJob::class,
         MemoSearchFts::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -33,7 +33,7 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                 DATABASE_NAME,
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -41,6 +41,16 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE transcription_jobs " +
                         "ADD COLUMN inferenceFingerprint TEXT",
+                )
+            }
+        }
+
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE transcription_jobs " +
+                        "ADD COLUMN transcriptionModelId TEXT NOT NULL " +
+                        "DEFAULT 'whisper-large-v3-turbo'",
                 )
             }
         }

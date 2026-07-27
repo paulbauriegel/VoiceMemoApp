@@ -225,6 +225,20 @@ public final class WhisperAttentionKeyTransposeTool {
         generate(
             Path.of(args[1]).toAbsolutePath().normalize(),
             Path.of(args[2]).toAbsolutePath().normalize());
+      } else if (
+          args.length == 5 && "generate-verified".equals(args[0])) {
+        generateVerified(
+            Path.of(args[1]).toAbsolutePath().normalize(),
+            args[2],
+            parseRewriteCounts(args[3]),
+            Path.of(args[4]).toAbsolutePath().normalize());
+      } else if (
+          args.length == 4
+              && "generate-mask-rank-reshapes-verified".equals(args[0])) {
+        generateMaskRankReshapesVerified(
+            Path.of(args[1]).toAbsolutePath().normalize(),
+            args[2],
+            Path.of(args[3]).toAbsolutePath().normalize());
       } else {
         throw new ToolFailure(
             "Usage: WhisperAttentionKeyTransposeTool inspect MODEL\n"
@@ -253,7 +267,12 @@ public final class WhisperAttentionKeyTransposeTool {
                 + "OUTPUT\n"
                 + "   or: WhisperAttentionKeyTransposeTool generate-k-projection-probe "
                 + "SOURCE OUTPUT\n"
-                + "   or: WhisperAttentionKeyTransposeTool generate SOURCE OUTPUT");
+                + "   or: WhisperAttentionKeyTransposeTool generate SOURCE OUTPUT\n"
+                + "   or: WhisperAttentionKeyTransposeTool generate-verified "
+                + "SOURCE EXPECTED_SHA256 REWRITES_PER_SUBGRAPH OUTPUT\n"
+                + "   or: WhisperAttentionKeyTransposeTool "
+                + "generate-mask-rank-reshapes-verified "
+                + "SOURCE EXPECTED_SHA256 OUTPUT");
       }
     } catch (ToolFailure error) {
       System.err.println("Whisper attention rewrite failed: " + error.getMessage());
@@ -275,6 +294,52 @@ public final class WhisperAttentionKeyTransposeTool {
         hasBuildPathSegment(output),
         "Rewritten output must stay under a build directory.");
     SourceContract contract = requirePinnedSource(source);
+    generate(source, output, contract);
+  }
+
+  private static void generateVerified(
+      Path source,
+      String expectedSha256,
+      int[] rewritesPerSubgraph,
+      Path output)
+      throws Exception {
+    require(Files.isRegularFile(source), "Source model is missing: " + source);
+    requireSha256(expectedSha256);
+    String actualSha256 = sha256(source);
+    require(
+        expectedSha256.equals(actualSha256),
+        "Source SHA-256 changed: expected "
+            + expectedSha256
+            + ", found "
+            + actualSha256
+            + ".");
+    require(
+        rewritesPerSubgraph.length > 0,
+        "At least one per-subgraph rewrite count is required.");
+    for (int count : rewritesPerSubgraph) {
+      require(count >= 0, "Rewrite counts must not be negative.");
+    }
+    generate(
+        source,
+        output,
+        new SourceContract(
+            "hash-verified FP16 experiment",
+            Files.size(source),
+            expectedSha256,
+            rewritesPerSubgraph));
+  }
+
+  private static void generate(
+      Path source, Path output, SourceContract contract) throws Exception {
+    require(Files.isRegularFile(source), "Source model is missing: " + source);
+    require(!source.equals(output), "Output must not replace the source model.");
+    require(
+        hasBuildPathSegment(output),
+        "Rewritten output must stay under a build directory.");
+    require(
+        Files.size(source) == contract.size()
+            && contract.sha256().equals(sha256(source)),
+        "Source model changed after its contract was established.");
     Files.createDirectories(output.getParent());
 
     Path temporary = output.resolveSibling(output.getFileName() + ".tmp");
@@ -336,6 +401,28 @@ public final class WhisperAttentionKeyTransposeTool {
     } finally {
       Files.deleteIfExists(temporary);
     }
+  }
+
+  private static int[] parseRewriteCounts(String value) {
+    require(
+        value != null && value.matches("[0-9]+(?:,[0-9]+)*"),
+        "Rewrite counts must be comma-separated non-negative integers.");
+    String[] parts = value.split(",");
+    int[] counts = new int[parts.length];
+    try {
+      for (int index = 0; index < parts.length; index++) {
+        counts[index] = Integer.parseInt(parts[index]);
+      }
+    } catch (NumberFormatException error) {
+      throw new ToolFailure("Rewrite count is outside the supported range.", error);
+    }
+    return counts;
+  }
+
+  private static void requireSha256(String value) {
+    require(
+        value != null && value.matches("[0-9a-f]{64}"),
+        "Expected SHA-256 must be 64 lowercase hexadecimal characters.");
   }
 
   private static SourceContract requirePinnedSource(Path source)
@@ -443,6 +530,7 @@ public final class WhisperAttentionKeyTransposeTool {
         || optionType == BuiltinOptions.MulOptions
         || optionType == BuiltinOptions.PadOptions
         || optionType == BuiltinOptions.ReducerOptions
+        || optionType == BuiltinOptions.ReshapeOptions
         || optionType == BuiltinOptions.SoftmaxOptions
         || optionType == BuiltinOptions.SubOptions
         || Byte.toUnsignedInt(optionType) == GELU_OPTIONS_TYPE) {
@@ -893,6 +981,19 @@ public final class WhisperAttentionKeyTransposeTool {
           (ReducerOptions) operator.builtinOptions(new ReducerOptions());
       return ReducerOptions.createReducerOptions(builder, source.keepDims());
     }
+    if (type == BuiltinOptions.ReshapeOptions) {
+      ReshapeOptions source =
+          (ReshapeOptions) operator.builtinOptions(new ReshapeOptions());
+      int[] shape = new int[source.newShapeLength()];
+      for (int index = 0; index < shape.length; index++) {
+        shape[index] = source.newShape(index);
+      }
+      int newShape =
+          shape.length == 0
+              ? 0
+              : ReshapeOptions.createNewShapeVector(builder, shape);
+      return ReshapeOptions.createReshapeOptions(builder, newShape);
+    }
     if (type == BuiltinOptions.SoftmaxOptions) {
       SoftmaxOptions source =
           (SoftmaxOptions) operator.builtinOptions(new SoftmaxOptions());
@@ -1082,8 +1183,8 @@ public final class WhisperAttentionKeyTransposeTool {
       require(options != null && !options.adjY(),
           "Rewritten graph still contains adj_y=true.");
       Tensor right = graph.tensors(operator.inputs(1));
-      if (right.shapeLength() != 3
-          || right.shape(right.shapeLength() - 2) != 64) {
+      if (right.name() == null
+          || !right.name().endsWith("/voicememo_explicit_transpose")) {
         continue;
       }
       Integer transposeIndex = producer.get(operator.inputs(1));
@@ -1807,6 +1908,309 @@ public final class WhisperAttentionKeyTransposeTool {
       System.out.println("remaining_adj_y_true=0");
     } finally {
       Files.deleteIfExists(temporary);
+    }
+  }
+
+  private static void generateMaskRankReshapesVerified(
+      Path source, String expectedSha256, Path output) throws Exception {
+    require(Files.isRegularFile(source), "Explicit-key source model is missing.");
+    require(!source.equals(output), "Mask-rank output must not replace its source.");
+    require(
+        hasBuildPathSegment(output),
+        "Mask-rank output must stay under a build directory.");
+    requireSha256(expectedSha256);
+    String actualSha256 = sha256(source);
+    require(
+        expectedSha256.equals(actualSha256),
+        "Source SHA-256 changed: expected "
+            + expectedSha256
+            + ", found "
+            + actualSha256
+            + ".");
+    Files.createDirectories(output.getParent());
+
+    Path temporary = output.resolveSibling(output.getFileName() + ".tmp");
+    Files.deleteIfExists(temporary);
+    try {
+      Files.copy(source, temporary, StandardCopyOption.REPLACE_EXISTING);
+      int decodeIndex;
+      int sourceTensorCount;
+      int sourceOperatorCount;
+      try (FileChannel sourceChannel =
+              FileChannel.open(source, StandardOpenOption.READ);
+          FileChannel outputChannel =
+              FileChannel.open(
+                  temporary, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+        ByteBuffer sourceBytes =
+            sourceChannel
+                .map(FileChannel.MapMode.READ_ONLY, 0, sourceChannel.size())
+                .order(ByteOrder.LITTLE_ENDIAN);
+        Model sourceModel = parseModel(sourceBytes);
+        SignatureDef decodeSignature = requireSignature(sourceModel, "decode");
+        // The cached 0.2.0 schema predates the generated subgraphIndex()
+        // accessor, but the current SignatureDef wire field is stable.
+        decodeIndex = readIntField(decodeSignature, 10, 0);
+        require(
+            decodeIndex >= 0 && decodeIndex < sourceModel.subgraphsLength(),
+            "Decode signature subgraph index is invalid.");
+        SubGraph decode = sourceModel.subgraphs(decodeIndex);
+        validateCloneableGraph(decode);
+        List<Integer> maskAdds =
+            discoverVerifiedMaskAdds(sourceModel, decode);
+        sourceTensorCount = decode.tensorsLength();
+        sourceOperatorCount = decode.operatorsLength();
+        ByteBuffer decodeFragment =
+            buildVerifiedMaskRankSubgraph(
+                sourceModel, decode, maskAdds);
+        long fragmentOffset = align(outputChannel.size(), Integer.BYTES);
+        if (fragmentOffset > outputChannel.size()) {
+          writeFully(
+              outputChannel,
+              ByteBuffer.allocate(
+                  Math.toIntExact(fragmentOffset - outputChannel.size())),
+              outputChannel.size());
+        }
+        int fragmentRoot = decodeFragment.getInt(decodeFragment.position());
+        require(
+            fragmentRoot > 0 && fragmentRoot < decodeFragment.remaining(),
+            "Generated mask-rank subgraph root is invalid.");
+        writeFully(outputChannel, decodeFragment, fragmentOffset);
+        int subgraphVector =
+            tableVectorStart(sourceModel, 8, "model subgraphs");
+        int vectorElement =
+            Math.addExact(
+                subgraphVector + Integer.BYTES,
+                Math.multiplyExact(decodeIndex, Integer.BYTES));
+        writeForwardOffset(
+            outputChannel,
+            vectorElement,
+            Math.toIntExact(fragmentOffset + fragmentRoot),
+            "hash-verified mask-rank decode subgraph");
+        outputChannel.force(true);
+      }
+      verifyMaskRankReshapes(
+          source,
+          temporary,
+          decodeIndex,
+          sourceTensorCount,
+          sourceOperatorCount);
+      moveAtomically(temporary, output);
+      System.out.println("source=" + source);
+      System.out.println("source_contract=hash-verified FP16 experiment");
+      System.out.println("variant=explicit-key-plus-mask-rank-reshape");
+      System.out.println("output=" + output);
+      System.out.println("bytes=" + Files.size(output));
+      System.out.println("sha256=" + sha256(output));
+      System.out.println("mask_rank_reshapes=" + FULL_DECODER_MASK_RESHAPE_COUNT);
+      System.out.println("remaining_adj_y_true=0");
+    } finally {
+      Files.deleteIfExists(temporary);
+    }
+  }
+
+  private static List<Integer> discoverVerifiedMaskAdds(
+      Model model, SubGraph decode) {
+    List<Integer> result = new ArrayList<>();
+    for (int index = 1; index + 1 < decode.operatorsLength(); index++) {
+      Operator add = decode.operators(index);
+      if (model
+                  .operatorCodes(Math.toIntExact(add.opcodeIndex()))
+                  .builtinCode()
+              != BuiltinOperator.ADD
+          || add.inputsLength() != 2
+          || add.outputsLength() != 1) {
+        continue;
+      }
+      Tensor scores = decode.tensors(add.inputs(0));
+      Tensor mask = decode.tensors(add.inputs(1));
+      Tensor masked = decode.tensors(add.outputs(0));
+      if (!Arrays.equals(tensorShape(scores), new int[] {20, 128, 128})
+          || !Arrays.equals(tensorShape(mask), new int[] {1, 1, 128, 128})
+          || !Arrays.equals(
+              tensorShape(masked), new int[] {1, 20, 128, 128})) {
+        continue;
+      }
+      Operator producer = decode.operators(index - 1);
+      require(
+          model
+                      .operatorCodes(Math.toIntExact(producer.opcodeIndex()))
+                      .builtinCode()
+                  == BuiltinOperator.BATCH_MATMUL
+              && producer.outputsLength() == 1
+              && producer.outputs(0) == add.inputs(0),
+          "Causal-mask ADD score producer changed at operator " + index + ".");
+      result.add(index);
+    }
+    require(
+        result.size() == FULL_DECODER_MASK_RESHAPE_COUNT,
+        "Expected "
+            + FULL_DECODER_MASK_RESHAPE_COUNT
+            + " decoder causal-mask ADD sites, found "
+            + result
+            + ".");
+    return result;
+  }
+
+  private static ByteBuffer buildVerifiedMaskRankSubgraph(
+      Model model, SubGraph decode, List<Integer> maskAdds) {
+    Map<Integer, Integer> rankTensorForAdd = new LinkedHashMap<>();
+    for (int index = 0; index < maskAdds.size(); index++) {
+      rankTensorForAdd.put(
+          maskAdds.get(index), decode.tensorsLength() + index);
+    }
+
+    FlatBufferBuilder builder = new FlatBufferBuilder(24 * 1024 * 1024);
+    int[] tensorTables =
+        new int[decode.tensorsLength() + maskAdds.size()];
+    for (int index = 0; index < decode.tensorsLength(); index++) {
+      tensorTables[index] = cloneTensor(builder, decode.tensors(index));
+    }
+    for (Map.Entry<Integer, Integer> entry : rankTensorForAdd.entrySet()) {
+      Operator add = decode.operators(entry.getKey());
+      Tensor scores = decode.tensors(add.inputs(0));
+      tensorTables[entry.getValue()] =
+          createTensor(
+              builder,
+              new int[] {1, 20, 128, 128},
+              TensorType.FLOAT32,
+              0,
+              scores.name() + "/voicememo_explicit_rank4",
+              0,
+              false,
+              null,
+              true,
+              true);
+    }
+    int tensors = SubGraph.createTensorsVector(builder, tensorTables);
+
+    int reshapeOpcode = findOperatorCode(model, BuiltinOperator.RESHAPE);
+    require(reshapeOpcode >= 0, "Source model has no RESHAPE operator code.");
+    int[] operatorTables =
+        new int[decode.operatorsLength() + maskAdds.size()];
+    int destination = 0;
+    for (int index = 0; index < decode.operatorsLength(); index++) {
+      Operator source = decode.operators(index);
+      Integer rankTensor = rankTensorForAdd.get(index);
+      if (rankTensor != null) {
+        int rankShape =
+            ReshapeOptions.createNewShapeVector(
+                builder, new int[] {1, 20, 128, 128});
+        int rankOptions =
+            ReshapeOptions.createReshapeOptions(builder, rankShape);
+        operatorTables[destination++] =
+            createOperator(
+                builder,
+                reshapeOpcode,
+                new int[] {source.inputs(0)},
+                new int[] {rankTensor},
+                BuiltinOptions.ReshapeOptions,
+                rankOptions,
+                new byte[0],
+                (byte) 0,
+                new boolean[0],
+                new int[0]);
+        operatorTables[destination++] =
+            cloneOperatorReplacingInput(builder, source, 0, rankTensor);
+      } else {
+        operatorTables[destination++] =
+            cloneOperator(builder, source, null);
+      }
+    }
+    require(
+        destination == operatorTables.length,
+        "Mask-rank decoder operator count is inconsistent.");
+    int operators = SubGraph.createOperatorsVector(builder, operatorTables);
+    int inputs =
+        SubGraph.createInputsVector(builder, operatorInputs(decode, true));
+    int outputs =
+        SubGraph.createOutputsVector(builder, operatorInputs(decode, false));
+    int name =
+        builder.createString(
+            decode.name() == null
+                ? "decode_voicememo_mask_rank"
+                : decode.name() + "_voicememo_mask_rank");
+    int graph =
+        SubGraph.createSubGraph(
+            builder, tensors, inputs, outputs, operators, name);
+    builder.finish(graph);
+    return builder.dataBuffer().slice().order(ByteOrder.LITTLE_ENDIAN);
+  }
+
+  private static void verifyMaskRankReshapes(
+      Path source,
+      Path output,
+      int decodeIndex,
+      int sourceTensorCount,
+      int sourceOperatorCount)
+      throws Exception {
+    require(
+        Files.size(output) > Files.size(source),
+        "Mask-rank model did not grow.");
+    try (FileChannel sourceChannel =
+            FileChannel.open(source, StandardOpenOption.READ);
+        FileChannel outputChannel =
+            FileChannel.open(output, StandardOpenOption.READ)) {
+      Model before =
+          parseModel(
+              sourceChannel
+                  .map(FileChannel.MapMode.READ_ONLY, 0, sourceChannel.size())
+                  .order(ByteOrder.LITTLE_ENDIAN));
+      Model after =
+          parseModel(
+              outputChannel
+                  .map(FileChannel.MapMode.READ_ONLY, 0, outputChannel.size())
+                  .order(ByteOrder.LITTLE_ENDIAN));
+      require(
+          before.subgraphsLength() == after.subgraphsLength(),
+          "Mask-rank subgraph count changed.");
+      SubGraph beforeDecode = before.subgraphs(decodeIndex);
+      SubGraph afterDecode = after.subgraphs(decodeIndex);
+      require(
+          afterDecode.tensorsLength()
+                  == sourceTensorCount + FULL_DECODER_MASK_RESHAPE_COUNT
+              && afterDecode.operatorsLength()
+                  == sourceOperatorCount + FULL_DECODER_MASK_RESHAPE_COUNT,
+          "Mask-rank decode graph size changed unexpectedly.");
+      require(
+          Arrays.equals(
+                  operatorInputs(beforeDecode, true),
+                  operatorInputs(afterDecode, true))
+              && Arrays.equals(
+                  operatorInputs(beforeDecode, false),
+                  operatorInputs(afterDecode, false)),
+          "Mask-rank decode signature tensors changed.");
+      int barriers = 0;
+      for (int index = 0;
+          index < afterDecode.operatorsLength();
+          index++) {
+        Operator operator = afterDecode.operators(index);
+        if (after
+                    .operatorCodes(Math.toIntExact(operator.opcodeIndex()))
+                    .builtinCode()
+                != BuiltinOperator.RESHAPE
+            || operator.outputsLength() != 1
+            || operator.outputs(0) < sourceTensorCount) {
+          continue;
+        }
+        require(
+            operator.inputsLength() == 1
+                && Arrays.equals(
+                    tensorShape(afterDecode.tensors(operator.inputs(0))),
+                    new int[] {20, 128, 128})
+                && Arrays.equals(
+                    tensorShape(afterDecode.tensors(operator.outputs(0))),
+                    new int[] {1, 20, 128, 128})
+                && index + 1 < afterDecode.operatorsLength()
+                && afterDecode.operators(index + 1).inputs(0)
+                    == operator.outputs(0),
+            "Mask-rank barrier changed.");
+        barriers++;
+      }
+      require(
+          barriers == FULL_DECODER_MASK_RESHAPE_COUNT,
+          "Mask-rank barrier count changed: " + barriers + ".");
+      requireNoImplicitAdjY(
+          after, afterDecode, afterDecode.operatorsLength());
     }
   }
 
