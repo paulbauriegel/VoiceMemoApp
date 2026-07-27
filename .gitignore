@@ -21,3 +21,6 @@ app/schemas/*.tmp
 
 # Timestamped on-device performance reports collected by the developer tools.
 benchmark-results/
+
+scripts/__pycache__/
+scripts/tests/__pycache__/

@@ -3,6 +3,8 @@ package com.example.voicememo.backup
 import androidx.room.withTransaction
 import com.example.voicememo.data.MemoRecord
 import com.example.voicememo.data.MemoSearchFts
+import com.example.voicememo.data.ProjectIcon
+import com.example.voicememo.data.ProjectRecord
 import com.example.voicememo.data.TranscriptRecord
 import com.example.voicememo.data.VoiceMemoDatabase
 import com.example.voicememo.data.WaveformState
@@ -90,11 +92,13 @@ class RoomVoiceMemoBackupManager(
 internal data class BackupMemoSnapshot(
     val memo: MemoRecord,
     val transcript: TranscriptRecord?,
+    val project: ProjectRecord? = null,
 )
 
 internal data class RestoredMemo(
     val memo: MemoRecord,
     val transcript: TranscriptRecord?,
+    val project: ProjectRecord? = null,
 )
 
 internal interface VoiceMemoBackupStore {
@@ -112,10 +116,12 @@ private class RoomVoiceMemoBackupStore(
 
     override suspend fun snapshots(): List<BackupMemoSnapshot> =
         database.withTransaction {
+            val projects = dao.getAllProjects().associateBy(ProjectRecord::id)
             dao.getAllMemoAggregates().map { aggregate ->
                 BackupMemoSnapshot(
                     memo = aggregate.memo,
                     transcript = aggregate.transcripts.singleOrNull(),
+                    project = aggregate.memo.projectId?.let(projects::get),
                 )
             }
         }
@@ -125,6 +131,9 @@ private class RoomVoiceMemoBackupStore(
 
     override suspend fun insertRestored(memos: List<RestoredMemo>) {
         database.withTransaction {
+            memos.mapNotNull(RestoredMemo::project)
+                .distinctBy(ProjectRecord::id)
+                .forEach { dao.insertProjectIfAbsent(it) }
             memos.forEach { restored ->
                 dao.insertMemo(restored.memo)
                 restored.transcript?.let { dao.upsertTranscript(it) }
@@ -292,11 +301,17 @@ internal class DefaultVoiceMemoBackupManager(
                         audioPath = finalAudio.absolutePath,
                         waveformPath = finalWaveform?.absolutePath,
                         waveformState = source.waveformState,
+                        projectId = source.project?.id,
                         languageOverride = source.languageOverride,
                         pendingDeletion = false,
+                        isStarred = source.isStarred,
                     )
                     val transcript = source.transcript?.copy(memoId = destinationId)
-                    restored += RestoredMemo(memo = memo, transcript = transcript)
+                    restored += RestoredMemo(
+                        memo = memo,
+                        transcript = transcript,
+                        project = source.project,
+                    )
                     onProgress(
                         BackupProgress(
                             phase = BackupPhase.RESTORING,
@@ -391,7 +406,16 @@ internal class DefaultVoiceMemoBackupManager(
             setProperty("updatedAtMillis", memo.updatedAtMillis.toString())
             setProperty("durationMillis", memo.durationMillis.toString())
             setProperty("waveformState", memo.waveformState.name)
+            setProperty("isStarred", memo.isStarred.toString())
             putOptionalString("languageOverride", memo.languageOverride)
+            putOptionalString("projectId", snapshot.project?.id)
+            putOptionalString("projectName", snapshot.project?.name)
+            putOptionalLong("projectCreatedAtMillis", snapshot.project?.createdAtMillis)
+            putOptionalLong("projectUpdatedAtMillis", snapshot.project?.updatedAtMillis)
+            putOptionalString("projectIcon", snapshot.project?.icon?.name)
+            snapshot.project?.let {
+                setProperty("projectArchived", it.isArchived.toString())
+            }
             setProperty("audio.bytes", audio.length().toString())
             setProperty("audio.sha256", sha256(audio))
             setProperty("waveform.present", (waveform != null).toString())
@@ -544,6 +568,47 @@ internal class DefaultVoiceMemoBackupManager(
         }.getOrElse { throw VoiceMemoBackupException("A backup has an invalid waveform state.", it) }
         val languageOverride = metadata.optionalString("languageOverride")
             ?.also(::requireValidLanguage)
+        val isStarred = metadata.optionalBooleanIfDeclared("isStarred") ?: false
+        val projectId = metadata.optionalStringIfDeclared("projectId")
+        val projectName = metadata.optionalStringIfDeclared("projectName")
+        val projectCreatedAt = metadata.optionalLongIfDeclared("projectCreatedAtMillis")
+        val projectUpdatedAt = metadata.optionalLongIfDeclared("projectUpdatedAtMillis")
+        val projectIcon = metadata.optionalStringIfDeclared("projectIcon")
+            ?.let { value ->
+                runCatching { ProjectIcon.valueOf(value) }.getOrElse {
+                    throw VoiceMemoBackupException("A backup has an invalid project icon.", it)
+                }
+            }
+            ?: ProjectIcon.WORK
+        val projectArchived = metadata.optionalBooleanIfDeclared("projectArchived") ?: false
+        require((projectId == null) == (projectName == null)) {
+            "A backup has incomplete project metadata."
+        }
+        require(
+            projectId == null ||
+                (projectCreatedAt != null && projectUpdatedAt != null),
+        ) {
+            "A backup has incomplete project timestamps."
+        }
+        val project = projectId?.let { id ->
+            requireValidUuid(id)
+            require(projectName!!.isNotBlank() && projectName.length <= MAX_PROJECT_NAME_CHARACTERS) {
+                "A backup has an invalid project name."
+            }
+            val safeCreatedAt = requireNotNull(projectCreatedAt)
+            val safeUpdatedAt = requireNotNull(projectUpdatedAt)
+            require(safeCreatedAt >= 0L && safeUpdatedAt >= safeCreatedAt) {
+                "A backup has invalid project timestamps."
+            }
+            ProjectRecord(
+                id = id,
+                name = projectName,
+                createdAtMillis = safeCreatedAt,
+                updatedAtMillis = safeUpdatedAt,
+                icon = projectIcon,
+                isArchived = projectArchived,
+            )
+        }
         val audio = File(directory, AUDIO_FILE)
         verifyFile(
             file = audio,
@@ -643,6 +708,8 @@ internal class DefaultVoiceMemoBackupManager(
             durationMillis = duration,
             waveformState = waveformState,
             languageOverride = languageOverride,
+            isStarred = isStarred,
+            project = project,
             audio = audio,
             waveform = waveform,
             transcript = transcript,
@@ -770,6 +837,8 @@ internal class DefaultVoiceMemoBackupManager(
         val durationMillis: Long,
         val waveformState: WaveformState,
         val languageOverride: String?,
+        val isStarred: Boolean,
+        val project: ProjectRecord?,
         val audio: File,
         val waveform: File?,
         val transcript: TranscriptRecord?,
@@ -829,6 +898,9 @@ private fun Properties.requiredBoolean(key: String): Boolean =
         else -> throw VoiceMemoBackupException("Backup metadata “$key” is invalid: $value")
     }
 
+private fun Properties.optionalBooleanIfDeclared(key: String): Boolean? =
+    if (containsKey(key)) requiredBoolean(key) else null
+
 private fun Properties.requiredSha256(key: String): String =
     required(key).lowercase().also {
         require(SHA256_PATTERN.matches(it)) { "Backup metadata “$key” is invalid." }
@@ -842,6 +914,9 @@ private fun Properties.putOptionalString(key: String, value: String?) {
 private fun Properties.optionalString(key: String): String? =
     if (requiredBoolean("$key.present")) required(key) else null
 
+private fun Properties.optionalStringIfDeclared(key: String): String? =
+    if (containsKey("$key.present")) optionalString(key) else null
+
 private fun Properties.putOptionalLong(key: String, value: Long?) {
     setProperty("$key.present", (value != null).toString())
     value?.let { setProperty(key, it.toString()) }
@@ -849,6 +924,9 @@ private fun Properties.putOptionalLong(key: String, value: Long?) {
 
 private fun Properties.optionalLong(key: String): Long? =
     if (requiredBoolean("$key.present")) requiredLong(key) else null
+
+private fun Properties.optionalLongIfDeclared(key: String): Long? =
+    if (containsKey("$key.present")) optionalLong(key) else null
 
 private fun String.toUtf8Bounded(): ByteArray =
     toByteArray(Charsets.UTF_8).also {
@@ -1102,6 +1180,7 @@ private const val PENDING_RESTORE_MARKER = ".voice-memo-restore-pending"
 private const val MAX_MEMOS = 10_000
 private const val MAX_ENTRIES = 60_001
 private const val MAX_TITLE_CHARACTERS = 240
+private const val MAX_PROJECT_NAME_CHARACTERS = 80
 private const val MAX_LANGUAGE_CHARACTERS = 32
 private const val MAX_ID_ATTEMPTS = 100
 private const val COPY_BUFFER_BYTES = 64 * 1024

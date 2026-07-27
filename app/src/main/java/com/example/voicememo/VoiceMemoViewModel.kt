@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.voicememo.data.MemoDetail
 import com.example.voicememo.data.MemoLibrarySearchResult
 import com.example.voicememo.data.MemoSummary
+import com.example.voicememo.data.ProjectIcon
+import com.example.voicememo.data.ProjectSummary
 import com.example.voicememo.data.TranscriptionJob
 import com.example.voicememo.data.TranscriptionJobStatus
 import com.example.voicememo.data.TranscriptChunk
@@ -22,10 +24,12 @@ import com.example.voicememo.sharing.ShareContent
 import com.example.voicememo.sharing.ShareableMemo
 import com.example.voicememo.ui.DetailSection
 import com.example.voicememo.ui.LicenseUi
+import com.example.voicememo.ui.LibraryTab
 import com.example.voicememo.ui.ModelAvailabilityPhase
 import com.example.voicememo.ui.ModelAvailabilityUiState
 import com.example.voicememo.ui.PendingDeleteUi
 import com.example.voicememo.ui.PendingShareUi
+import com.example.voicememo.ui.ProjectListItemUi
 import com.example.voicememo.ui.RecorderPhase
 import com.example.voicememo.ui.RecorderUiState
 import com.example.voicememo.ui.SharePayload
@@ -188,6 +192,13 @@ class VoiceMemoViewModel(
             result
         }
 
+    private val libraryContent: Flow<LibraryContent> = combine(
+        library,
+        repository.observeProjects(),
+    ) { searchResult, projects ->
+        LibraryContent(searchResult = searchResult, projects = projects)
+    }
+
     private val detail: Flow<MemoDetail?> = presentation
         .map { it.selectedMemoId }
         .distinctUntilChanged()
@@ -208,20 +219,41 @@ class VoiceMemoViewModel(
         }
 
     val uiState: StateFlow<VoiceMemoAppUiState> = combine(
-        library,
+        libraryContent,
         detail,
         container.recorderController.state,
         container.memoPlayer.state,
         presentation,
-    ) { searchResult, memoDetail, recorder, playback, local ->
+    ) { content, memoDetail, recorder, playback, local ->
+        val searchResult = content.searchResult
         val memos = searchResult.memos.takeIf {
             searchResult.query == local.query
-        }.orEmpty()
-        val visibleMemoIds = memos.mapTo(hashSetOf(), MemoSummary::id)
+        }.orEmpty().let { allMemos ->
+            local.activeProjectId?.let { projectId ->
+                allMemos.filter { it.projectId == projectId }
+            } ?: allMemos
+        }
+        val activeProject = local.activeProjectId?.let { projectId ->
+            content.projects.firstOrNull { it.id == projectId }
+        }
+        val visibleMemoIds = if (
+            local.libraryTab == LibraryTab.Projects &&
+            local.activeProjectId == null
+        ) {
+            emptySet()
+        } else {
+            memos.mapTo(hashSetOf(), MemoSummary::id)
+        }
         VoiceMemoAppUiState(
             destination = local.destination,
             query = local.query,
+            libraryTab = local.libraryTab,
             memos = memos.map { it.toUi(playback) },
+            projects = content.projects.map { it.toUi() },
+            activeProjectId = activeProject?.id,
+            activeProjectName = activeProject?.name,
+            activeProjectIcon = activeProject?.icon ?: ProjectIcon.WORK,
+            activeProjectArchived = activeProject?.isArchived ?: false,
             selectedMemoIds = local.selectedMemoIds.intersect(visibleMemoIds),
             selectedMemoId = local.selectedMemoId,
             isImportingAudio = local.isImportingAudio || local.isAudioPickerOpen,
@@ -237,6 +269,9 @@ class VoiceMemoViewModel(
             modelAvailability = modelAvailability(),
             pendingDelete = local.pendingDelete,
             pendingShare = local.pendingShare,
+            pendingProjectDelete = local.pendingProjectDeleteId?.let { projectId ->
+                content.projects.firstOrNull { it.id == projectId }?.toUi()
+            },
             licenses = licenseItems,
         )
     }.stateIn(
@@ -260,10 +295,21 @@ class VoiceMemoViewModel(
         viewModelScope.launch {
             container.recorderController.state.collect { state ->
                 if (state is RecordingState.Completed) {
+                    val targetProjectId = presentation.value.recordingProjectId
+                    if (targetProjectId != null) {
+                        runCatching {
+                            repository.assignMemosToProject(setOf(state.memoId), targetProjectId)
+                        }.onFailure {
+                            mutableEffects.emitMessage(
+                                "Recording saved, but it could not be added to the project.",
+                            )
+                        }
+                    }
                     presentation.update {
                         it.copy(
                             destination = VoiceMemoDestination.Library,
                             selectedMemoIds = emptySet(),
+                            recordingProjectId = null,
                         )
                     }
                 }
@@ -315,6 +361,68 @@ class VoiceMemoViewModel(
                     }
                 }
 
+            is VoiceMemoUiAction.LibraryTabChanged -> presentation.update {
+                it.copy(
+                    libraryTab = action.tab,
+                    activeProjectId = null,
+                    selectedMemoIds = emptySet(),
+                    query = "",
+                )
+            }
+
+            is VoiceMemoUiAction.OpenProject -> {
+                if (uiState.value.projects.any { it.id == action.projectId }) {
+                    presentation.update {
+                        it.copy(
+                            libraryTab = LibraryTab.Projects,
+                            activeProjectId = action.projectId,
+                            selectedMemoIds = emptySet(),
+                            query = "",
+                        )
+                    }
+                }
+            }
+
+            VoiceMemoUiAction.CloseProject -> presentation.update {
+                it.copy(
+                    activeProjectId = null,
+                    selectedMemoIds = emptySet(),
+                    query = "",
+                )
+            }
+
+            is VoiceMemoUiAction.CreateProject -> createProject(
+                name = action.name,
+                memoIds = action.memoIds,
+            )
+
+            is VoiceMemoUiAction.UpdateProject -> updateProject(
+                projectId = action.projectId,
+                name = action.name,
+                icon = action.icon,
+            )
+
+            is VoiceMemoUiAction.SetProjectArchived -> setProjectArchived(
+                projectId = action.projectId,
+                archived = action.archived,
+            )
+
+            is VoiceMemoUiAction.AssignMemosToProject -> assignMemosToProject(
+                memoIds = action.memoIds,
+                projectId = action.projectId,
+            )
+
+            is VoiceMemoUiAction.RequestDeleteProject -> {
+                if (uiState.value.projects.any { it.id == action.projectId }) {
+                    presentation.update { it.copy(pendingProjectDeleteId = action.projectId) }
+                }
+            }
+
+            VoiceMemoUiAction.ConfirmDeleteProject -> deleteProject()
+            VoiceMemoUiAction.DismissDeleteProject -> presentation.update {
+                it.copy(pendingProjectDeleteId = null)
+            }
+
             VoiceMemoUiAction.StartRecording -> {
                 if (
                     presentation.value.isImportingAudio ||
@@ -332,6 +440,7 @@ class VoiceMemoViewModel(
                     it.copy(
                         destination = VoiceMemoDestination.Recorder,
                         selectedMemoIds = emptySet(),
+                        recordingProjectId = it.activeProjectId,
                     )
                 }
                 val state = container.recorderController.state.value
@@ -367,6 +476,20 @@ class VoiceMemoViewModel(
                         container.memoPlayer.playOrPause(memo.id, memo.audioPath)
                     }
                 }
+            }
+
+            is VoiceMemoUiAction.ToggleMemoStarred -> {
+                uiState.value.memos
+                    .firstOrNull { it.id == action.memoId }
+                    ?.let { memo ->
+                        viewModelScope.launch {
+                            runCatching {
+                                repository.setMemoStarred(memo.id, !memo.isStarred)
+                            }.onFailure {
+                                mutableEffects.emitMessage("Could not update the starred recording.")
+                            }
+                        }
+                    }
             }
 
             is VoiceMemoUiAction.ToggleMemoSelection -> {
@@ -498,9 +621,30 @@ class VoiceMemoViewModel(
             is VoiceMemoUiAction.DetailSeekChanged -> {
                 val duration = container.memoPlayer.state.value.durationMillis
                     .takeIf { it > 0 }
+                    ?: uiState.value.detail?.durationMillis
+                        ?.takeIf { it > 0 }
                     ?: uiState.value.detail?.let { parseDuration(it.durationLabel) }
                     ?: 0L
                 container.memoPlayer.seekTo((duration * action.fraction.coerceIn(0f, 1f)).toLong())
+            }
+
+            is VoiceMemoUiAction.DetailSeekBy -> {
+                val playerState = container.memoPlayer.state.value
+                val detail = uiState.value.detail
+                val duration = playerState.durationMillis
+                    .takeIf { it > 0 }
+                    ?: detail?.durationMillis
+                        ?.takeIf { it > 0 }
+                    ?: detail?.let { parseDuration(it.durationLabel) }
+                    ?: 0L
+                val position = if (playerState.memoId == detail?.id) {
+                    playerState.positionMillis
+                } else {
+                    detail?.playbackPositionMillis ?: 0L
+                }
+                container.memoPlayer.seekTo(
+                    (position + action.deltaMillis).coerceIn(0L, duration),
+                )
             }
 
             is VoiceMemoUiAction.DetailSectionChanged ->
@@ -886,6 +1030,11 @@ class VoiceMemoViewModel(
             local.selectedMemoIds.isNotEmpty() ->
                 presentation.update { it.copy(selectedMemoIds = emptySet()) }
 
+            local.destination == VoiceMemoDestination.Library && local.activeProjectId != null ->
+                presentation.update {
+                    it.copy(activeProjectId = null, query = "")
+                }
+
             local.destination != VoiceMemoDestination.Library ->
                 presentation.update {
                     it.copy(
@@ -917,6 +1066,7 @@ class VoiceMemoViewModel(
             .orEmpty()
         return VoiceMemoListItemUi(
             id = id,
+            projectId = projectId,
             title = title,
             monthLabel = monthFormat.format(Date(createdAtMillis)),
             dateLabel = dateFormat.format(Date(createdAtMillis)),
@@ -930,7 +1080,128 @@ class VoiceMemoViewModel(
             isPlaying = isCurrent && playback.isPlaying,
             transcriptPreview = displayTranscript.takeIf(String::isNotBlank),
             transcription = transcriptionSummary(latestJob, displayTranscript),
+            createdAtMillis = createdAtMillis,
+            isStarred = isStarred,
         )
+    }
+
+    private fun ProjectSummary.toUi(): ProjectListItemUi = ProjectListItemUi(
+        id = id,
+        name = name,
+        recordingCount = recordingCount,
+        recordingCountLabel = when (recordingCount) {
+            1 -> "1 recording"
+            else -> "$recordingCount recordings"
+        },
+        updatedLabel = "Updated ${formatProjectUpdate(updatedAtMillis)}",
+        icon = icon,
+        isArchived = isArchived,
+    )
+
+    private fun createProject(name: String, memoIds: Set<String>) {
+        viewModelScope.launch {
+            runCatching {
+                val project = repository.createProject(name)
+                if (memoIds.isNotEmpty()) {
+                    repository.assignMemosToProject(memoIds, project.id)
+                }
+                project
+            }.onSuccess { project ->
+                presentation.update {
+                    it.copy(
+                        libraryTab = LibraryTab.Projects,
+                        activeProjectId = project.id,
+                        selectedMemoIds = emptySet(),
+                        query = "",
+                    )
+                }
+            }.onFailure {
+                mutableEffects.emitMessage(it.message ?: "The project could not be created.")
+            }
+        }
+    }
+
+    private fun updateProject(projectId: String, name: String, icon: ProjectIcon) {
+        viewModelScope.launch {
+            runCatching { repository.updateProject(projectId, name, icon) }
+                .onFailure {
+                    mutableEffects.emitMessage(it.message ?: "The project could not be updated.")
+                }
+        }
+    }
+
+    private fun setProjectArchived(projectId: String, archived: Boolean) {
+        viewModelScope.launch {
+            runCatching { repository.setProjectArchived(projectId, archived) }
+                .onSuccess {
+                    if (archived) {
+                        presentation.update { local ->
+                            local.copy(
+                                activeProjectId = local.activeProjectId
+                                    .takeUnless { it == projectId },
+                                selectedMemoIds = emptySet(),
+                                query = "",
+                            )
+                        }
+                    }
+                }
+                .onFailure {
+                    mutableEffects.emitMessage(
+                        it.message ?: if (archived) {
+                            "The project could not be archived."
+                        } else {
+                            "The project could not be restored."
+                        },
+                    )
+                }
+        }
+    }
+
+    private fun assignMemosToProject(memoIds: Set<String>, projectId: String?) {
+        val visibleMemoIds = uiState.value.memos.mapTo(hashSetOf()) { it.id }
+        val safeIds = memoIds.intersect(visibleMemoIds)
+        if (safeIds.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { repository.assignMemosToProject(safeIds, projectId) }
+                .onSuccess {
+                    presentation.update { it.copy(selectedMemoIds = emptySet()) }
+                }
+                .onFailure {
+                    mutableEffects.emitMessage(
+                        it.message ?: "The recordings could not be moved.",
+                    )
+                }
+        }
+    }
+
+    private fun deleteProject() {
+        val projectId = presentation.value.pendingProjectDeleteId ?: return
+        presentation.update { it.copy(pendingProjectDeleteId = null) }
+        viewModelScope.launch {
+            runCatching { repository.deleteProject(projectId) }
+                .onSuccess {
+                    presentation.update {
+                        it.copy(
+                            activeProjectId = it.activeProjectId.takeUnless { id -> id == projectId },
+                            selectedMemoIds = emptySet(),
+                        )
+                    }
+                }
+                .onFailure {
+                    mutableEffects.emitMessage(it.message ?: "The project could not be deleted.")
+                }
+        }
+    }
+
+    private fun formatProjectUpdate(updatedAtMillis: Long): String {
+        val elapsed = (System.currentTimeMillis() - updatedAtMillis).coerceAtLeast(0L)
+        return when {
+            elapsed < 60_000L -> "just now"
+            elapsed < 3_600_000L -> "${elapsed / 60_000L}m ago"
+            elapsed < 86_400_000L -> "${elapsed / 3_600_000L}h ago"
+            elapsed < 172_800_000L -> "yesterday"
+            else -> projectDateFormat.format(Date(updatedAtMillis))
+        }
     }
 
     private fun MemoDetail.toUi(
@@ -951,6 +1222,7 @@ class VoiceMemoViewModel(
             isEditingTitle = local.titleEditing,
             dateLabel = dateFormat.format(Date(memo.createdAtMillis)),
             durationLabel = formatDuration(memo.durationMillis),
+            durationMillis = memo.durationMillis,
             playbackPositionLabel = formatDuration(
                 if (isCurrent) playback.positionMillis else 0L,
             ),
@@ -1169,6 +1441,9 @@ class VoiceMemoViewModel(
     private data class PresentationState(
         val destination: VoiceMemoDestination = VoiceMemoDestination.Library,
         val query: String = "",
+        val libraryTab: LibraryTab = LibraryTab.Recents,
+        val activeProjectId: String? = null,
+        val recordingProjectId: String? = null,
         val selectedMemoIds: Set<String> = emptySet(),
         val selectedMemoId: String? = null,
         val isImportingAudio: Boolean = false,
@@ -1185,6 +1460,7 @@ class VoiceMemoViewModel(
         val transcriptEditing: Boolean = false,
         val pendingDelete: PendingDeleteUi? = null,
         val pendingShare: PendingShareUi? = null,
+        val pendingProjectDeleteId: String? = null,
         val modelCheckNonce: Int = 0,
         val transcriptionTimestampsEnabled: Boolean = false,
         val voiceActivityDetectionEnabled: Boolean = true,
@@ -1206,6 +1482,12 @@ class VoiceMemoViewModel(
 
     private val monthFormat = SimpleDateFormat("MMMM", Locale.getDefault())
     private val dateFormat = SimpleDateFormat("EEE, MMM d", Locale.getDefault())
+    private val projectDateFormat = SimpleDateFormat("MMM d", Locale.getDefault())
+
+    private data class LibraryContent(
+        val searchResult: MemoLibrarySearchResult,
+        val projects: List<ProjectSummary>,
+    )
 
     private companion object {
         const val LIBRARY_WAVEFORM_BUCKETS = 160

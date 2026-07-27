@@ -118,6 +118,18 @@ fun VoiceMemoLicensesScreen(
             contentPadding = PaddingValues(spacing.sm),
             verticalArrangement = Arrangement.spacedBy(spacing.sm),
         ) {
+            item(key = "audio-heading") {
+                SettingsSectionHeading("Audio")
+            }
+
+            item(key = "import-audio") {
+                ImportAudioSettingsCard(
+                    isImportingAudio = isImportingAudio,
+                    enabled = !isFileOperationInProgress,
+                    onImportAudio = { onAction(VoiceMemoUiAction.ImportAudio) },
+                )
+            }
+
             item(key = "backup-heading") {
                 SettingsSectionHeading("Backup")
             }
@@ -230,18 +242,6 @@ fun VoiceMemoLicensesScreen(
                             VoiceMemoUiAction.VoiceActivityDetectionChanged(enabled),
                         )
                     },
-                )
-            }
-
-            item(key = "audio-heading") {
-                SettingsSectionHeading("Audio")
-            }
-
-            item(key = "import-audio") {
-                ImportAudioSettingsCard(
-                    isImportingAudio = isImportingAudio,
-                    enabled = !isFileOperationInProgress,
-                    onImportAudio = { onAction(VoiceMemoUiAction.ImportAudio) },
                 )
             }
 

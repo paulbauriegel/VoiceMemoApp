@@ -1,6 +1,8 @@
 package com.example.voicememo.backup
 
 import com.example.voicememo.data.MemoRecord
+import com.example.voicememo.data.ProjectIcon
+import com.example.voicememo.data.ProjectRecord
 import com.example.voicememo.data.TranscriptRecord
 import com.example.voicememo.data.WaveformState
 import java.io.ByteArrayInputStream
@@ -49,6 +51,14 @@ class VoiceMemoBackupManagerTest {
                 editedAtMillis = 1_700_000_000_300L,
                 generatedRevision = 4,
             ),
+            project = ProjectRecord(
+                id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                name = "Customer research",
+                createdAtMillis = 1_699_000_000_000L,
+                updatedAtMillis = 1_700_000_000_100L,
+                icon = ProjectIcon.LIGHTBULB,
+                isArchived = true,
+            ),
         )
         val exportStore = FakeBackupStore(initialSnapshots = listOf(snapshot))
         val archive = ByteArrayOutputStream()
@@ -86,6 +96,9 @@ class VoiceMemoBackupManagerTest {
         assertEquals(snapshot.memo.updatedAtMillis, restored.memo.updatedAtMillis)
         assertEquals(snapshot.memo.durationMillis, restored.memo.durationMillis)
         assertEquals(snapshot.memo.languageOverride, restored.memo.languageOverride)
+        assertEquals(snapshot.memo.isStarred, restored.memo.isStarred)
+        assertEquals(snapshot.project, restored.project)
+        assertEquals(snapshot.project?.id, restored.memo.projectId)
         assertArrayEquals(audioBytes, File(restored.memo.audioPath).readBytes())
         assertArrayEquals(
             waveformBytes,
@@ -314,6 +327,7 @@ class VoiceMemoBackupManagerTest {
             editedAtMillis = null,
             generatedRevision = 1,
         ),
+        project: ProjectRecord? = null,
     ): BackupMemoSnapshot {
         val directory = File(root, id).apply { mkdirs() }
         val audio = File(directory, "audio.wav").apply { writeBytes(audioBytes) }
@@ -335,8 +349,10 @@ class VoiceMemoBackupManagerTest {
                     WaveformState.READY
                 },
                 languageOverride = "de",
+                isStarred = true,
             ),
             transcript = transcript,
+            project = project,
         )
     }
 }

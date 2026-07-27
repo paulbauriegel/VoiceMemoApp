@@ -11,6 +11,39 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface VoiceMemoDao {
+    @Query(
+        """
+        SELECT projects.id, projects.name, projects.createdAtMillis, projects.updatedAtMillis,
+               projects.icon, projects.isArchived,
+               COUNT(memos.id) AS recordingCount
+        FROM projects
+        LEFT JOIN memos
+          ON memos.projectId = projects.id
+         AND memos.pendingDeletion = 0
+        GROUP BY projects.id
+        ORDER BY projects.updatedAtMillis DESC, projects.name COLLATE NOCASE ASC
+        """,
+    )
+    fun observeProjects(): Flow<List<ProjectSummary>>
+
+    @Query("SELECT * FROM projects WHERE id = :projectId LIMIT 1")
+    suspend fun getProject(projectId: String): ProjectRecord?
+
+    @Query("SELECT * FROM projects")
+    suspend fun getAllProjects(): List<ProjectRecord>
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertProject(project: ProjectRecord)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertProjectIfAbsent(project: ProjectRecord)
+
+    @Update
+    suspend fun updateProject(project: ProjectRecord)
+
+    @Query("DELETE FROM projects WHERE id = :projectId")
+    suspend fun deleteProject(projectId: String)
+
     @Transaction
     @Query(
         """
@@ -91,6 +124,28 @@ interface VoiceMemoDao {
 
     @Update
     suspend fun updateMemo(memo: MemoRecord)
+
+    @Query(
+        """
+        UPDATE memos
+        SET projectId = :projectId, updatedAtMillis = :updatedAtMillis
+        WHERE id IN (:memoIds) AND pendingDeletion = 0
+        """,
+    )
+    suspend fun assignMemosToProject(
+        memoIds: Collection<String>,
+        projectId: String?,
+        updatedAtMillis: Long,
+    )
+
+    @Query(
+        """
+        UPDATE memos
+        SET isStarred = :starred
+        WHERE id = :memoId AND pendingDeletion = 0
+        """,
+    )
+    suspend fun setMemoStarred(memoId: String, starred: Boolean)
 
     @Query("UPDATE memos SET pendingDeletion = :pending, updatedAtMillis = :updatedAtMillis WHERE id IN (:memoIds)")
     suspend fun markPendingDeletion(

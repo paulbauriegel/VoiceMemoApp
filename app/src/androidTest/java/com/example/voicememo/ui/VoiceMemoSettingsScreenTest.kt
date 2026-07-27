@@ -10,6 +10,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,6 +19,34 @@ import org.junit.runner.RunWith
 class VoiceMemoSettingsScreenTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComposeTestHostActivity>()
+
+    @Test
+    fun audioImportIsTheFirstSettingsSection() {
+        composeRule.setContent {
+            VoiceMemoTheme(dynamicColor = false) {
+                VoiceMemoLicensesScreen(
+                    licenses = emptyList(),
+                    isImportingAudio = false,
+                    onAction = {},
+                )
+            }
+        }
+
+        val importTop = composeRule
+            .onNodeWithTag("settings_import_audio")
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .top
+        val backupTop = composeRule
+            .onNodeWithTag("settings_export_backup")
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .top
+
+        assertTrue("Audio import should appear before Backup", importTop < backupTop)
+    }
 
     @Test
     fun openSourceLicensesAreCompactNamedRows() {

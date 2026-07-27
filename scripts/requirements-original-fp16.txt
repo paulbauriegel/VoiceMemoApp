@@ -1,0 +1,10 @@
+# Python 3.11 is required. TensorFlow currently needs the legacy Keras package
+# for Hugging Face's TFWhisper implementation.
+numpy==2.1.3
+soundfile==0.13.1
+torch==2.7.1
+tensorflow==2.19.0
+tf-keras==2.19.0
+transformers==4.53.3
+accelerate==1.9.0
+safetensors==0.5.3

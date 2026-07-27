@@ -50,6 +50,43 @@ class VoiceMemoLibraryHeaderTest {
     }
 
     @Test
+    fun projectModeUsesTitleAndExpandableSearch() {
+        val actions = mutableListOf<VoiceMemoUiAction>()
+        composeRule.setContent {
+            VoiceMemoTheme(dynamicColor = false) {
+                VoiceMemoLibraryScreen(
+                    state = VoiceMemoPreviewData.appState.copy(
+                        libraryTab = LibraryTab.Projects,
+                        activeProjectId = "project-work",
+                        activeProjectName = "Work",
+                    ),
+                    onAction = actions::add,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("project_header").assertIsDisplayed()
+        composeRule.onNodeWithTag("project_title").assertIsDisplayed()
+        composeRule.onNodeWithText("Work").assertIsDisplayed()
+        composeRule.onNodeWithTag("project_search_field").assertDoesNotExist()
+        composeRule.onNodeWithTag("library_search_header").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Settings").assertDoesNotExist()
+
+        composeRule.onNodeWithContentDescription("Search in project").performClick()
+
+        composeRule.onNodeWithTag("project_search_header").assertIsDisplayed()
+        composeRule.onNodeWithTag("project_search_field").assertIsDisplayed()
+        composeRule.onNodeWithTag("project_header").assertDoesNotExist()
+
+        composeRule.onNodeWithContentDescription("Close project search").performClick()
+
+        composeRule.onNodeWithTag("project_header").assertIsDisplayed()
+        composeRule.onNodeWithTag("project_search_field").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Back to projects").performClick()
+        assertEquals(listOf(VoiceMemoUiAction.CloseProject), actions)
+    }
+
+    @Test
     fun selectionModeReplacesSearchHeader() {
         composeRule.setContent {
             VoiceMemoTheme(dynamicColor = false) {

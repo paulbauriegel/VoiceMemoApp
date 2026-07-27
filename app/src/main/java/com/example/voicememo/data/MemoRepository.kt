@@ -28,6 +28,8 @@ interface MemoDeletionHooks {
 }
 
 interface MemoRepository {
+    fun observeProjects(): Flow<List<ProjectSummary>>
+
     fun observeLibrary(query: String = ""): Flow<List<MemoSummary>>
 
     /**
@@ -43,6 +45,18 @@ interface MemoRepository {
     suspend fun getMemo(memoId: String): MemoRecord?
 
     suspend fun createMemo(newMemo: NewMemo): MemoRecord
+
+    suspend fun createProject(name: String): ProjectRecord
+
+    suspend fun updateProject(projectId: String, name: String, icon: ProjectIcon)
+
+    suspend fun setProjectArchived(projectId: String, archived: Boolean)
+
+    suspend fun assignMemosToProject(memoIds: Set<String>, projectId: String?)
+
+    suspend fun setMemoStarred(memoId: String, starred: Boolean)
+
+    suspend fun deleteProject(projectId: String)
 
     suspend fun updateTitle(memoId: String, title: String)
 
@@ -138,6 +152,9 @@ class RoomMemoRepository(
 ) : MemoRepository {
     private val dao = database.voiceMemoDao()
 
+    override fun observeProjects(): Flow<List<ProjectSummary>> =
+        dao.observeProjects().distinctUntilChanged()
+
     override fun observeLibrary(query: String): Flow<List<MemoSummary>> =
         observeLibraryQueries(flowOf(query)).map { result -> result.memos }
 
@@ -217,6 +234,78 @@ class RoomMemoRepository(
             dao.replaceSearchEntry(memo, transcript = null)
         }
         return memo
+    }
+
+    override suspend fun createProject(name: String): ProjectRecord {
+        val normalizedName = name.trim()
+        require(normalizedName.isNotBlank()) { "Project name must not be blank." }
+        require(normalizedName.length <= 80) { "Project name is too long." }
+        val now = System.currentTimeMillis()
+        return ProjectRecord(
+            id = UUID.randomUUID().toString(),
+            name = normalizedName,
+            createdAtMillis = now,
+            updatedAtMillis = now,
+        ).also { dao.insertProject(it) }
+    }
+
+    override suspend fun updateProject(projectId: String, name: String, icon: ProjectIcon) {
+        val normalizedName = name.trim()
+        require(normalizedName.isNotBlank()) { "Project name must not be blank." }
+        require(normalizedName.length <= 80) { "Project name is too long." }
+        database.withTransaction {
+            val project = requireNotNull(dao.getProject(projectId)) {
+                "Unknown project: $projectId"
+            }
+            dao.updateProject(
+                project.copy(
+                    name = normalizedName,
+                    icon = icon,
+                    updatedAtMillis = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    override suspend fun setProjectArchived(projectId: String, archived: Boolean) {
+        database.withTransaction {
+            val project = requireNotNull(dao.getProject(projectId)) {
+                "Unknown project: $projectId"
+            }
+            dao.updateProject(
+                project.copy(
+                    isArchived = archived,
+                    updatedAtMillis = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    override suspend fun assignMemosToProject(memoIds: Set<String>, projectId: String?) {
+        if (memoIds.isEmpty()) return
+        database.withTransaction {
+            val project = projectId?.let { id ->
+                requireNotNull(dao.getProject(id)) { "Unknown project: $id" }
+            }
+            require(project?.isArchived != true) {
+                "Archived projects must be restored before recordings can be moved into them."
+            }
+            val now = System.currentTimeMillis()
+            dao.assignMemosToProject(memoIds, projectId, now)
+            project?.let { dao.updateProject(it.copy(updatedAtMillis = now)) }
+        }
+    }
+
+    override suspend fun setMemoStarred(memoId: String, starred: Boolean) {
+        requireNotNull(dao.getMemo(memoId)) { "Unknown memo: $memoId" }
+        dao.setMemoStarred(memoId, starred)
+    }
+
+    override suspend fun deleteProject(projectId: String) {
+        database.withTransaction {
+            requireNotNull(dao.getProject(projectId)) { "Unknown project: $projectId" }
+            dao.deleteProject(projectId)
+        }
     }
 
     override suspend fun updateTitle(memoId: String, title: String) {

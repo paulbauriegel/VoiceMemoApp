@@ -44,12 +44,46 @@ enum class TranscriptChunkStatus {
     FAILED,
 }
 
+enum class ProjectIcon {
+    WORK,
+    LIGHTBULB,
+    PERSON,
+    HOME,
+    SCHOOL,
+    MUSIC,
+}
+
+@Entity(
+    tableName = "projects",
+    indices = [
+        Index(value = ["updatedAtMillis"]),
+    ],
+)
+data class ProjectRecord(
+    @androidx.room.PrimaryKey
+    val id: String,
+    val name: String,
+    val createdAtMillis: Long,
+    val updatedAtMillis: Long,
+    val icon: ProjectIcon = ProjectIcon.WORK,
+    val isArchived: Boolean = false,
+)
+
 @Entity(
     tableName = "memos",
+    foreignKeys = [
+        ForeignKey(
+            entity = ProjectRecord::class,
+            parentColumns = ["id"],
+            childColumns = ["projectId"],
+            onDelete = ForeignKey.SET_NULL,
+        ),
+    ],
     indices = [
         Index(value = ["createdAtMillis"]),
         Index(value = ["updatedAtMillis"]),
         Index(value = ["pendingDeletion"]),
+        Index(value = ["projectId"]),
     ],
 )
 data class MemoRecord(
@@ -62,6 +96,8 @@ data class MemoRecord(
     val audioPath: String,
     val waveformPath: String?,
     val waveformState: WaveformState,
+    /** Null keeps the recording in Recents without assigning it to a project. */
+    val projectId: String? = null,
     /**
      * Null means Auto. A non-null value is a Whisper language code such as
      * "en" or "de" and is applied to the next transcription/retry.
@@ -72,6 +108,8 @@ data class MemoRecord(
      * Tombstoned rows are excluded from every user-facing query.
      */
     val pendingDeletion: Boolean = false,
+    /** User-controlled favorite state used by the Starred recordings filter. */
+    val isStarred: Boolean = false,
 )
 
 @Entity(
@@ -247,10 +285,22 @@ data class MemoSummary(
     val waveformPath: String?,
     val waveformState: WaveformState,
     val languageOverride: String?,
+    val projectId: String? = null,
     val effectiveTranscript: String,
     val transcriptSource: TranscriptSource,
     val detectedLanguage: String?,
     val latestJob: TranscriptionJob?,
+    val isStarred: Boolean = false,
+)
+
+data class ProjectSummary(
+    val id: String,
+    val name: String,
+    val createdAtMillis: Long,
+    val updatedAtMillis: Long,
+    val recordingCount: Int,
+    val icon: ProjectIcon,
+    val isArchived: Boolean,
 )
 
 data class MemoMonthGroup(
@@ -296,9 +346,11 @@ internal fun MemoAggregate.toSummary(): MemoSummary {
         waveformPath = memo.waveformPath,
         waveformState = memo.waveformState,
         languageOverride = memo.languageOverride,
+        projectId = memo.projectId,
         effectiveTranscript = transcript?.effectiveText.orEmpty(),
         transcriptSource = source,
         detectedLanguage = transcript?.detectedLanguage,
         latestJob = latestJob,
+        isStarred = memo.isStarred,
     )
 }

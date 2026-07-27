@@ -31,6 +31,13 @@ class RoomTypeConverters {
         TranscriptChunkStatus.valueOf(value)
 
     @TypeConverter
+    fun projectIconToString(value: ProjectIcon): String = value.name
+
+    @TypeConverter
+    fun stringToProjectIcon(value: String): ProjectIcon =
+        runCatching { ProjectIcon.valueOf(value) }.getOrDefault(ProjectIcon.WORK)
+
+    @TypeConverter
     fun tokenIdsToString(value: List<Int>): String = value.joinToString(separator = ",")
 
     @TypeConverter

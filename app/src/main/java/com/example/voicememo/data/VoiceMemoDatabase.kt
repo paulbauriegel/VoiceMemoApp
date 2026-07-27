@@ -11,12 +11,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [
         MemoRecord::class,
+        ProjectRecord::class,
         TranscriptRecord::class,
         TranscriptChunk::class,
         TranscriptionJob::class,
         MemoSearchFts::class,
     ],
-    version = 3,
+    version = 6,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -33,7 +34,13 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                 DATABASE_NAME,
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                )
                 .build()
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -51,6 +58,56 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                     "ALTER TABLE transcription_jobs " +
                         "ADD COLUMN transcriptionModelId TEXT NOT NULL " +
                         "DEFAULT 'whisper-large-v3-turbo'",
+                )
+            }
+        }
+
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `projects` (
+                        `id` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `createdAtMillis` INTEGER NOT NULL,
+                        `updatedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_projects_updatedAtMillis` " +
+                        "ON `projects` (`updatedAtMillis`)",
+                )
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `projectId` TEXT " +
+                        "REFERENCES `projects`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_memos_projectId` " +
+                        "ON `memos` (`projectId`)",
+                )
+            }
+        }
+
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `isStarred` " +
+                        "INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `projects` ADD COLUMN `icon` " +
+                        "TEXT NOT NULL DEFAULT 'WORK'",
+                )
+                db.execSQL(
+                    "ALTER TABLE `projects` ADD COLUMN `isArchived` " +
+                        "INTEGER NOT NULL DEFAULT 0",
                 )
             }
         }

@@ -1,5 +1,7 @@
 package com.example.voicememo.ui
 
+import com.example.voicememo.data.ProjectIcon
+
 /**
  * Presentation-only state consumed by [VoiceMemoApp].
  *
@@ -9,7 +11,13 @@ package com.example.voicememo.ui
 data class VoiceMemoAppUiState(
     val destination: VoiceMemoDestination = VoiceMemoDestination.Library,
     val query: String = "",
+    val libraryTab: LibraryTab = LibraryTab.Recents,
     val memos: List<VoiceMemoListItemUi> = emptyList(),
+    val projects: List<ProjectListItemUi> = emptyList(),
+    val activeProjectId: String? = null,
+    val activeProjectName: String? = null,
+    val activeProjectIcon: ProjectIcon = ProjectIcon.WORK,
+    val activeProjectArchived: Boolean = false,
     val selectedMemoIds: Set<String> = emptySet(),
     val selectedMemoId: String? = null,
     val isImportingAudio: Boolean = false,
@@ -25,6 +33,7 @@ data class VoiceMemoAppUiState(
     val modelAvailability: ModelAvailabilityUiState = ModelAvailabilityUiState(),
     val pendingDelete: PendingDeleteUi? = null,
     val pendingShare: PendingShareUi? = null,
+    val pendingProjectDelete: ProjectListItemUi? = null,
     val licenses: List<LicenseUi> = emptyList(),
 )
 
@@ -35,8 +44,14 @@ enum class VoiceMemoDestination {
     Settings,
 }
 
+enum class LibraryTab {
+    Recents,
+    Projects,
+}
+
 data class VoiceMemoListItemUi(
     val id: String,
+    val projectId: String? = null,
     val title: String,
     val monthLabel: String,
     val dateLabel: String,
@@ -46,6 +61,18 @@ data class VoiceMemoListItemUi(
     val isPlaying: Boolean = false,
     val transcriptPreview: String? = null,
     val transcription: TranscriptionSummaryUi = TranscriptionSummaryUi(),
+    val createdAtMillis: Long = 0L,
+    val isStarred: Boolean = false,
+)
+
+data class ProjectListItemUi(
+    val id: String,
+    val name: String,
+    val recordingCount: Int,
+    val recordingCountLabel: String,
+    val updatedLabel: String,
+    val icon: ProjectIcon = ProjectIcon.WORK,
+    val isArchived: Boolean = false,
 )
 
 data class TranscriptionSummaryUi(
@@ -81,6 +108,7 @@ data class VoiceMemoDetailUi(
     val isEditingTitle: Boolean = false,
     val dateLabel: String,
     val durationLabel: String,
+    val durationMillis: Long = 0L,
     val playbackPositionLabel: String = "00:00",
     val playbackPositionMillis: Long = 0L,
     val playbackFraction: Float = 0f,
@@ -180,6 +208,29 @@ data class LicenseUi(
 
 sealed interface VoiceMemoUiAction {
     data class SearchChanged(val query: String) : VoiceMemoUiAction
+    data class LibraryTabChanged(val tab: LibraryTab) : VoiceMemoUiAction
+    data class OpenProject(val projectId: String) : VoiceMemoUiAction
+    object CloseProject : VoiceMemoUiAction
+    data class CreateProject(
+        val name: String,
+        val memoIds: Set<String> = emptySet(),
+    ) : VoiceMemoUiAction
+    data class UpdateProject(
+        val projectId: String,
+        val name: String,
+        val icon: ProjectIcon,
+    ) : VoiceMemoUiAction
+    data class SetProjectArchived(
+        val projectId: String,
+        val archived: Boolean,
+    ) : VoiceMemoUiAction
+    data class AssignMemosToProject(
+        val memoIds: Set<String>,
+        val projectId: String?,
+    ) : VoiceMemoUiAction
+    data class RequestDeleteProject(val projectId: String) : VoiceMemoUiAction
+    object ConfirmDeleteProject : VoiceMemoUiAction
+    object DismissDeleteProject : VoiceMemoUiAction
 
     object ImportAudio : VoiceMemoUiAction
     object ExportBackup : VoiceMemoUiAction
@@ -193,6 +244,7 @@ sealed interface VoiceMemoUiAction {
 
     data class OpenMemo(val memoId: String) : VoiceMemoUiAction
     data class ToggleMemoPlayback(val memoId: String) : VoiceMemoUiAction
+    data class ToggleMemoStarred(val memoId: String) : VoiceMemoUiAction
     data class ToggleMemoSelection(val memoId: String) : VoiceMemoUiAction
     object ClearSelection : VoiceMemoUiAction
     object SelectAll : VoiceMemoUiAction
@@ -221,6 +273,7 @@ sealed interface VoiceMemoUiAction {
 
     object ToggleDetailPlayback : VoiceMemoUiAction
     data class DetailSeekChanged(val fraction: Float) : VoiceMemoUiAction
+    data class DetailSeekBy(val deltaMillis: Long) : VoiceMemoUiAction
     data class DetailSectionChanged(val section: DetailSection) : VoiceMemoUiAction
 
     data class TranscriptLanguageChanged(val languageCode: String) : VoiceMemoUiAction
@@ -250,6 +303,8 @@ object VoiceMemoPreviewData {
         waveform = waveformOne,
         playbackFraction = .32f,
         transcriptPreview = "We should keep the first release focused on local recording and transcription.",
+        createdAtMillis = System.currentTimeMillis(),
+        isStarred = true,
         transcription = TranscriptionSummaryUi(
             phase = TranscriptionPhase.Complete,
             statusLabel = "Transcript ready",
@@ -263,10 +318,46 @@ object VoiceMemoPreviewData {
         dateLabel = "Wed, Jul 22",
         durationLabel = "16:59",
         waveform = waveformTwo,
+        createdAtMillis = System.currentTimeMillis() - 86_400_000L,
         transcription = TranscriptionSummaryUi(
             phase = TranscriptionPhase.Transcribing,
             progress = .58f,
             statusLabel = "Transcribing 58%",
+        ),
+    )
+
+    val memoThree = memoTwo.copy(
+        id = "memo-3",
+        title = "Jul 21 at 9:18 AM",
+        dateLabel = "Tue, Jul 21",
+        durationLabel = "04:32",
+        waveform = waveformOne,
+        createdAtMillis = System.currentTimeMillis() - 172_800_000L,
+    )
+
+    val projects = listOf(
+        ProjectListItemUi(
+            id = "project-work",
+            name = "Work",
+            recordingCount = 12,
+            recordingCountLabel = "12 recordings",
+            updatedLabel = "Updated 2h ago",
+        ),
+        ProjectListItemUi(
+            id = "project-ideas",
+            name = "Ideas",
+            recordingCount = 7,
+            recordingCountLabel = "7 recordings",
+            updatedLabel = "Updated yesterday",
+            icon = ProjectIcon.LIGHTBULB,
+        ),
+        ProjectListItemUi(
+            id = "project-personal",
+            name = "Personal",
+            recordingCount = 5,
+            recordingCountLabel = "5 recordings",
+            updatedLabel = "Updated Jul 20",
+            icon = ProjectIcon.PERSON,
         ),
     )
 
@@ -275,7 +366,9 @@ object VoiceMemoPreviewData {
         title = memoOne.title,
         dateLabel = memoOne.dateLabel,
         durationLabel = memoOne.durationLabel,
+        durationMillis = 166_000L,
         playbackPositionLabel = "00:53",
+        playbackPositionMillis = 53_000L,
         playbackFraction = .32f,
         waveform = waveformOne + waveformTwo,
         selectedSection = DetailSection.Transcript,
@@ -306,7 +399,12 @@ object VoiceMemoPreviewData {
     )
 
     val appState = VoiceMemoAppUiState(
-        memos = listOf(memoOne, memoTwo),
+        memos = listOf(
+            memoOne,
+            memoTwo.copy(projectId = projects[1].id),
+            memoThree.copy(projectId = projects[2].id),
+        ),
+        projects = projects,
         selectedMemoId = memoOne.id,
         detail = detail,
         modelAvailability = ModelAvailabilityUiState(

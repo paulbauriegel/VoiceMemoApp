@@ -27,8 +27,11 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Forward10
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Replay5
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Save
@@ -40,6 +43,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,6 +67,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -181,10 +186,6 @@ fun VoiceMemoDetailScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f),
-                        )
-                        TranscriptPlaybackControl(
-                            detail = detail,
-                            onAction = onAction,
                         )
                     }
                 }
@@ -328,20 +329,66 @@ private fun WaveformPlayer(
 private fun TranscriptPlaybackControl(
     detail: VoiceMemoDetailUi,
     onAction: (VoiceMemoUiAction) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainer,
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Slider(
+            value = detail.playbackFraction.coerceIn(0f, 1f),
+            onValueChange = {
+                onAction(VoiceMemoUiAction.DetailSeekChanged(it))
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription =
+                        "Transcript playback position ${detail.playbackPositionLabel} " +
+                            "of ${detail.durationLabel}"
+                },
+        )
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = detail.playbackPositionLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = formatRemainingTime(
+                    durationMillis = detail.durationMillis,
+                    positionMillis = detail.playbackPositionMillis,
+                ),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            FilledTonalIconButton(
+                onClick = {
+                    onAction(VoiceMemoUiAction.DetailSeekBy(deltaMillis = -5_000L))
+                },
+                modifier = Modifier.size(56.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Replay5,
+                    contentDescription = "Skip back 5 seconds",
+                )
+            }
             FilledTonalButton(
                 onClick = { onAction(VoiceMemoUiAction.ToggleDetailPlayback) },
-                modifier = Modifier.heightIn(min = 48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 64.dp),
             ) {
                 Icon(
                     imageVector = if (detail.isPlaying) {
@@ -352,15 +399,36 @@ private fun TranscriptPlaybackControl(
                     contentDescription = null,
                 )
                 Spacer(Modifier.size(8.dp))
-                Text(if (detail.isPlaying) "Pause" else "Play audio")
+                Text(if (detail.isPlaying) "Pause" else "Play")
             }
-            Text(
-                text = "${detail.playbackPositionLabel} / ${detail.durationLabel}",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            FilledTonalIconButton(
+                onClick = {
+                    onAction(VoiceMemoUiAction.DetailSeekBy(deltaMillis = 10_000L))
+                },
+                modifier = Modifier.size(56.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Forward10,
+                    contentDescription = "Skip forward 10 seconds",
+                )
+            }
         }
+    }
+}
+
+private fun formatRemainingTime(
+    durationMillis: Long,
+    positionMillis: Long,
+): String {
+    val remainingSeconds = (durationMillis - positionMillis)
+        .coerceAtLeast(0L) / 1_000L
+    val hours = remainingSeconds / 3_600L
+    val minutes = (remainingSeconds % 3_600L) / 60L
+    val seconds = remainingSeconds % 60L
+    return if (hours > 0L) {
+        "-%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "-%02d:%02d".format(minutes, seconds)
     }
 }
 
@@ -609,9 +677,10 @@ private fun TranscriptDetails(
                         },
                     )
                 } else {
-                    TranscriptTextPanel(
+                    TranscriptFocusPanel(
+                        detail = detail,
                         transcript = transcript,
-                        playbackPositionMillis = detail.playbackPositionMillis,
+                        onAction = onAction,
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),
@@ -669,15 +738,49 @@ private fun TranscriptDetails(
 }
 
 @Composable
+private fun TranscriptFocusPanel(
+    detail: VoiceMemoDetailUi,
+    transcript: TranscriptDetailUi,
+    onAction: (VoiceMemoUiAction) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.testTag("transcript_focus_panel"),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            TranscriptTextPanel(
+                transcript = transcript,
+                playbackPositionMillis = detail.playbackPositionMillis,
+                containerColor = Color.Transparent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+            TranscriptPlaybackControl(
+                detail = detail,
+                onAction = onAction,
+            )
+        }
+    }
+}
+
+@Composable
 private fun TranscriptTextPanel(
     transcript: TranscriptDetailUi,
     playbackPositionMillis: Long,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerLow,
     modifier: Modifier = Modifier,
 ) {
     Surface(
         modifier = modifier.testTag("transcript_text"),
         shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = containerColor,
     ) {
         val segments = transcript.segments
         if (segments.isEmpty()) {
@@ -728,7 +831,7 @@ private fun TranscriptSegmentRow(
         targetValue = if (active) {
             MaterialTheme.colorScheme.primaryContainer
         } else {
-            MaterialTheme.colorScheme.surfaceContainerLow
+            Color.Transparent
         },
         label = "segmentContainerColor",
     )
@@ -744,38 +847,37 @@ private fun TranscriptSegmentRow(
         contentColor = contentColor,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 14.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.Top,
         ) {
             Text(
                 text = segment.startLabel,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 color = if (active) {
                     MaterialTheme.colorScheme.primary
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                modifier = Modifier.width(56.dp),
+                modifier = Modifier.width(48.dp),
             )
             SelectionContainer(
                 modifier = Modifier.weight(1f),
             ) {
                 Text(
                     text = segment.text,
-                    style = if (active) {
-                        MaterialTheme.typography.titleMedium
-                    } else {
-                        MaterialTheme.typography.bodyLarge
-                    },
+                    style = MaterialTheme.typography.bodyMedium,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                 )
             }
-            Text(
-                text = segment.endLabel,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (active) {
+                Icon(
+                    imageVector = Icons.Rounded.GraphicEq,
+                    contentDescription = "Currently playing",
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }

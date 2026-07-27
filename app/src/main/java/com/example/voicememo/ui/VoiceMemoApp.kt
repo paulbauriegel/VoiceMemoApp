@@ -38,7 +38,7 @@ fun VoiceMemoApp(
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
 ) {
     VoiceMemoTheme(
         darkTheme = darkTheme,
@@ -75,6 +75,14 @@ fun VoiceMemoApp(
                 request = request,
                 onDismiss = { onAction(VoiceMemoUiAction.DismissShare) },
                 onShare = { onAction(VoiceMemoUiAction.ShareAs(it)) },
+            )
+        }
+
+        uiState.pendingProjectDelete?.let { project ->
+            DeleteProjectDialog(
+                project = project,
+                onDismiss = { onAction(VoiceMemoUiAction.DismissDeleteProject) },
+                onConfirm = { onAction(VoiceMemoUiAction.ConfirmDeleteProject) },
             )
         }
     }
@@ -215,7 +223,7 @@ private fun EmptyDetailPane() {
 }
 
 @Preview(
-    name = "Library - warm light",
+    name = "Library - blue light",
     showBackground = true,
     widthDp = 412,
     heightDp = 892,
@@ -231,7 +239,7 @@ private fun LibraryPreview() {
 }
 
 @Preview(
-    name = "List detail - warm dark",
+    name = "List detail - blue dark",
     showBackground = true,
     widthDp = 900,
     heightDp = 700,

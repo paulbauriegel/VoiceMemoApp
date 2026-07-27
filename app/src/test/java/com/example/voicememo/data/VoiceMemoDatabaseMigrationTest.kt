@@ -4,6 +4,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import java.lang.reflect.Proxy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceMemoDatabaseMigrationTest {
@@ -57,6 +58,78 @@ class VoiceMemoDatabaseMigrationTest {
             executedSql,
         )
         val normalizedSql = executedSql.single().uppercase()
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+    }
+
+    @Test
+    fun migrationThreeToFourAddsProjectsWithoutChangingExistingMemoFiles() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_3_4.migrate(database)
+
+        assertEquals(4, executedSql.size)
+        val normalizedSql = executedSql.joinToString("\n").uppercase()
+        assertTrue(normalizedSql.contains("CREATE TABLE IF NOT EXISTS `PROJECTS`"))
+        assertTrue(normalizedSql.contains("ADD COLUMN `PROJECTID` TEXT"))
+        assertTrue(normalizedSql.contains("ON DELETE SET NULL"))
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE FROM"))
+    }
+
+    @Test
+    fun migrationFourToFiveAddsNonNullStarredDefaultWithoutDeletingData() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_4_5.migrate(database)
+
+        assertEquals(
+            listOf(
+                "ALTER TABLE `memos` ADD COLUMN `isStarred` " +
+                    "INTEGER NOT NULL DEFAULT 0",
+            ),
+            executedSql,
+        )
+        val normalizedSql = executedSql.single().uppercase()
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+    }
+
+    @Test
+    fun migrationFiveToSixAddsProjectIconAndArchiveDefaultsWithoutDeletingData() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_5_6.migrate(database)
+
+        assertEquals(
+            listOf(
+                "ALTER TABLE `projects` ADD COLUMN `icon` TEXT NOT NULL DEFAULT 'WORK'",
+                "ALTER TABLE `projects` ADD COLUMN `isArchived` INTEGER NOT NULL DEFAULT 0",
+            ),
+            executedSql,
+        )
+        val normalizedSql = executedSql.joinToString("\n").uppercase()
         assertFalse(normalizedSql.contains("DROP "))
         assertFalse(normalizedSql.contains("DELETE "))
     }
