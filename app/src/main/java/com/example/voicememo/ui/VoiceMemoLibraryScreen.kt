@@ -1485,14 +1485,16 @@ private fun VoiceMemoCard(
             }
 
             Text(
-                text = memo.transcriptPreview ?: memo.transcription.statusLabel,
+                text = memo.generatedSummary
+                    ?: memo.transcriptPreview
+                    ?: memo.transcription.statusLabel,
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (selected) {
                     selectedContentColor.copy(alpha = 0.82f)
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                maxLines = 2,
+                maxLines = if (memo.generatedSummary != null) 1 else 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.fillMaxWidth(),
             )

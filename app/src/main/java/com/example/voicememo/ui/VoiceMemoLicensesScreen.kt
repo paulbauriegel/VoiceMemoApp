@@ -20,8 +20,11 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.SettingsBrightness
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -48,6 +51,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.example.voicememo.settings.AppearanceMode
 
 @Composable
 fun VoiceMemoLicensesScreen(
@@ -56,6 +60,7 @@ fun VoiceMemoLicensesScreen(
     isExportingBackup: Boolean = false,
     isRestoringBackup: Boolean = false,
     showRestoreBackupConfirmation: Boolean = false,
+    appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
     transcriptionTimestampsEnabled: Boolean = false,
     voiceActivityDetectionEnabled: Boolean = true,
     gpuAccelerationEnabled: Boolean = true,
@@ -118,6 +123,19 @@ fun VoiceMemoLicensesScreen(
             contentPadding = PaddingValues(spacing.sm),
             verticalArrangement = Arrangement.spacedBy(spacing.sm),
         ) {
+            item(key = "appearance-heading") {
+                SettingsSectionHeading("Appearance")
+            }
+
+            item(key = "appearance") {
+                AppearanceSettingsCard(
+                    selectedMode = appearanceMode,
+                    onSelected = { mode ->
+                        onAction(VoiceMemoUiAction.AppearanceModeChanged(mode))
+                    },
+                )
+            }
+
             item(key = "audio-heading") {
                 SettingsSectionHeading("Audio")
             }
@@ -302,6 +320,57 @@ fun VoiceMemoLicensesScreen(
                         },
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppearanceSettingsCard(
+    selectedMode: AppearanceMode,
+    onSelected: (AppearanceMode) -> Unit,
+) {
+    val options = listOf(
+        Triple(AppearanceMode.SYSTEM, "System default", Icons.Rounded.SettingsBrightness),
+        Triple(AppearanceMode.LIGHT, "Light", Icons.Rounded.LightMode),
+        Triple(AppearanceMode.DARK, "Dark", Icons.Rounded.DarkMode),
+    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("settings_appearance"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        options.forEach { (mode, label, icon) ->
+            ListItem(
+                headlineContent = { Text(label) },
+                leadingContent = {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                    )
+                },
+                trailingContent = {
+                    RadioButton(
+                        selected = selectedMode == mode,
+                        onClick = null,
+                    )
+                },
+                modifier = Modifier
+                    .clickable { onSelected(mode) }
+                    .testTag("settings_appearance_${mode.name.lowercase()}"),
+                colors = ListItemDefaults.colors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            )
+            if (mode != AppearanceMode.DARK) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                )
             }
         }
     }

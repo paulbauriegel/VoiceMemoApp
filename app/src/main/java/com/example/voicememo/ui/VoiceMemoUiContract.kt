@@ -1,6 +1,7 @@
 package com.example.voicememo.ui
 
 import com.example.voicememo.data.ProjectIcon
+import com.example.voicememo.settings.AppearanceMode
 
 /**
  * Presentation-only state consumed by [VoiceMemoApp].
@@ -24,6 +25,7 @@ data class VoiceMemoAppUiState(
     val isExportingBackup: Boolean = false,
     val isRestoringBackup: Boolean = false,
     val showRestoreBackupConfirmation: Boolean = false,
+    val appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
     val transcriptionTimestampsEnabled: Boolean = false,
     val voiceActivityDetectionEnabled: Boolean = true,
     val gpuAccelerationEnabled: Boolean = true,
@@ -60,6 +62,7 @@ data class VoiceMemoListItemUi(
     val playbackFraction: Float = 0f,
     val isPlaying: Boolean = false,
     val transcriptPreview: String? = null,
+    val generatedSummary: String? = null,
     val transcription: TranscriptionSummaryUi = TranscriptionSummaryUi(),
     val createdAtMillis: Long = 0L,
     val isStarred: Boolean = false,
@@ -114,6 +117,8 @@ data class VoiceMemoDetailUi(
     val playbackFraction: Float = 0f,
     val isPlaying: Boolean = false,
     val waveform: List<Float>,
+    val generatedSummary: String? = null,
+    val isGeneratingMetadata: Boolean = false,
     val selectedSection: DetailSection = DetailSection.Audio,
     val transcript: TranscriptDetailUi = TranscriptDetailUi(),
 )
@@ -261,6 +266,7 @@ sealed interface VoiceMemoUiAction {
     object OpenSettings : VoiceMemoUiAction
     data class OpenLicenseSource(val url: String) : VoiceMemoUiAction
     object RetryModelAvailabilityCheck : VoiceMemoUiAction
+    data class AppearanceModeChanged(val mode: AppearanceMode) : VoiceMemoUiAction
     data class TranscriptionTimestampsChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class VoiceActivityDetectionChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class GpuAccelerationChanged(val enabled: Boolean) : VoiceMemoUiAction

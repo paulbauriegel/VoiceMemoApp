@@ -16,6 +16,7 @@ import com.example.voicememo.playback.MemoPlayer
 import com.example.voicememo.recording.AndroidRecorderController
 import com.example.voicememo.recording.RecorderController
 import com.example.voicememo.sharing.ShareExporter
+import com.example.voicememo.settings.AppearancePreferences
 import com.example.voicememo.settings.TranscriptionPreferences
 import com.example.voicememo.work.TranscriptionCoordinator
 import com.example.voicememo.work.WorkManagerTranscriptionCoordinator
@@ -36,6 +37,9 @@ class AppContainer(
     val shareExporter: ShareExporter by lazy { ShareExporter(applicationContext) }
     val transcriptionPreferences: TranscriptionPreferences by lazy {
         TranscriptionPreferences(applicationContext)
+    }
+    val appearancePreferences: AppearancePreferences by lazy {
+        AppearancePreferences(applicationContext)
     }
     val backupManager: VoiceMemoBackupManager by lazy {
         RoomVoiceMemoBackupManager(

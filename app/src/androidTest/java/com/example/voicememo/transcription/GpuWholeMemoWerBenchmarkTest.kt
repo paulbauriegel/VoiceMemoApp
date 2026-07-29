@@ -10,6 +10,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.example.voicememo.VoiceMemoApplication
 import com.google.ai.edge.litert.CompiledModel
 import java.io.File
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
@@ -33,6 +34,9 @@ class GpuWholeMemoWerBenchmarkTest {
         val arguments = InstrumentationRegistry.getArguments()
         val context = instrumentation.targetContext
         val application = context.applicationContext as VoiceMemoApplication
+        require(application.container.memoRepository.getOldestRunnableJob() == null) {
+            "A VoiceMemo transcription job is queued, running, or paused."
+        }
         val runId = requireSafeRunId(arguments.getString(ARG_RUN_ID))
         val candidateOnly =
             arguments.getString(ARG_CANDIDATE_ONLY)
@@ -40,16 +44,34 @@ class GpuWholeMemoWerBenchmarkTest {
                 ?: false
         val candidateBackend =
             arguments.getString(ARG_CANDIDATE_BACKEND) ?: CANDIDATE_BACKEND_GPU
-        require(candidateBackend in setOf(CANDIDATE_BACKEND_GPU, CANDIDATE_BACKEND_CPU)) {
+        require(
+            candidateBackend in setOf(
+                CANDIDATE_BACKEND_GPU,
+                CANDIDATE_BACKEND_CPU,
+                CANDIDATE_BACKEND_WHISPER_CPP,
+            ),
+        ) {
             "Unsupported candidate backend: $candidateBackend"
         }
         val cpuWorkers = arguments.getString(ARG_CPU_WORKERS)?.toIntOrNull() ?: 2
         val cpuThreads = arguments.getString(ARG_CPU_THREADS)?.toIntOrNull() ?: 3
-        require(cpuWorkers in 1..2) { "CPU workers must be 1 or 2." }
+        val whisperCppThreads =
+            arguments.getString(ARG_WHISPER_CPP_THREADS)?.toIntOrNull() ?: 4
+        val whisperCppBackend = WhisperCppBenchmarkBackend.fromArgument(
+            arguments.getString(ARG_WHISPER_CPP_BACKEND)
+                ?: WhisperCppBenchmarkBackend.CPU.argument,
+        )
+        require(cpuWorkers in setOf(1, 2, 4)) {
+            "CPU workers must be 1, 2, or 4."
+        }
         require(cpuThreads in 1..8) { "CPU threads must be between 1 and 8." }
+        require(whisperCppThreads in 1..8) {
+            "whisper.cpp threads must be between 1 and 8."
+        }
         val externalModelName = arguments.getString(ARG_EXTERNAL_MODEL_NAME)
         val externalModelSha256 = arguments.getString(ARG_EXTERNAL_MODEL_SHA256)
         val externalAudioName = arguments.getString(ARG_EXTERNAL_AUDIO_NAME)
+        val memoId = arguments.getString(ARG_MEMO_ID)
         val forcedLanguage = arguments.getString(ARG_FORCED_LANGUAGE)
         val gpuPrecisionName = arguments.getString(ARG_GPU_PRECISION) ?: GPU_PRECISION_FP32
         val gpuPrecision = when (gpuPrecisionName) {
@@ -80,28 +102,61 @@ class GpuWholeMemoWerBenchmarkTest {
         ) {
             "External model SHA-256 is invalid."
         }
-        require(!candidateOnly || externalAudioName != null) {
-            "Candidate-only mode requires an external audio file."
+        val whisperCppModel =
+            if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
+                val model = WhisperCppBenchmarkModel.fromFileName(
+                    requireNotNull(externalModelName),
+                )
+                require(model != null && externalModelSha256 == model.sha256) {
+                    "whisper.cpp requires a pinned large-v3-turbo benchmark model."
+                }
+                model
+            } else {
+                null
+            }
+        require(!candidateOnly || externalAudioName != null || memoId != null) {
+            "Candidate-only mode requires an external audio file or existing memo ID."
         }
         require(!candidateOnly || !promotionGate) {
             "Candidate-only mode does not use the existing promotion gate."
         }
-        val gpuModelOverride = when {
-            externalModelName != null -> GpuModelOverride(
-                filePath = requireStagedFile(
-                    context = context,
-                    directory = EXTERNAL_MODEL_DIRECTORY,
-                    name = externalModelName,
-                    extension = ".tflite",
-                ).absolutePath,
+        val externalModelFile = externalModelName?.let { name ->
+            requireStagedFile(
+                context = context,
+                directory = if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
+                    WHISPER_CPP_MODEL_DIRECTORY
+                } else {
+                    EXTERNAL_MODEL_DIRECTORY
+                },
+                name = name,
+                extension = if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
+                    ".bin"
+                } else {
+                    ".tflite"
+                },
             )
+        }
+        if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
+            val modelFile = requireNotNull(externalModelFile)
+            val model = requireNotNull(whisperCppModel)
+            require(modelFile.length() == model.sizeBytes) {
+                "Staged whisper.cpp model size does not match the pinned artifact."
+            }
+            require(sha256(modelFile) == model.sha256) {
+                "Staged whisper.cpp model SHA-256 does not match the pinned artifact."
+            }
+        }
+        val gpuModelOverride = when {
+            externalModelFile != null && candidateBackend != CANDIDATE_BACKEND_WHISPER_CPP ->
+                GpuModelOverride(
+                    filePath = externalModelFile.absolutePath,
+                )
             useFullFloatDecoder -> GpuModelOverride(
                 assets = instrumentation.context.assets,
                 assetPath = FULL_FLOAT_DECODER_ASSET,
             )
             else -> null
         }
-        val memoId = arguments.getString(ARG_MEMO_ID)
         val audioFile = if (externalAudioName != null) {
             requireStagedFile(
                 context = context,
@@ -141,6 +196,9 @@ class GpuWholeMemoWerBenchmarkTest {
             .put("candidate_backend", candidateBackend)
             .put("cpu_workers", cpuWorkers)
             .put("cpu_threads_per_worker", cpuThreads)
+            .put("whisper_cpp_threads", whisperCppThreads)
+            .put("whisper_cpp_backend", whisperCppBackend.argument)
+            .put("whisper_cpp_model", whisperCppModel?.argument ?: JSONObject.NULL)
             .put("use_full_float_decoder", useFullFloatDecoder)
             .put("promotion_gate", promotionGate)
             .put("external_model_name", externalModelName ?: JSONObject.NULL)
@@ -170,13 +228,30 @@ class GpuWholeMemoWerBenchmarkTest {
             report.put("audio", audioInfo)
 
             if (candidateOnly) {
-                val externalModelPath = requireNotNull(gpuModelOverride?.filePath)
+                val externalModelPath = requireNotNull(externalModelFile).absolutePath
                 val candidate = benchmarkWithEngines(
                     context = context,
                     audioFile = audioFile,
                     mode = when {
+                        whisperCppModel == WhisperCppBenchmarkModel.Q8_0 &&
+                            whisperCppBackend == WhisperCppBenchmarkBackend.VULKAN ->
+                            Mode.WHISPER_CPP_Q8_0_VULKAN
+                        whisperCppModel == WhisperCppBenchmarkModel.Q8_0 ->
+                            Mode.WHISPER_CPP_Q8_0_CPU
+                        whisperCppModel == WhisperCppBenchmarkModel.FP16 &&
+                            whisperCppBackend == WhisperCppBenchmarkBackend.VULKAN ->
+                            Mode.WHISPER_CPP_FP16_VULKAN
+                        whisperCppModel == WhisperCppBenchmarkModel.FP16 ->
+                            Mode.WHISPER_CPP_FP16_CPU
+                        candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP &&
+                            whisperCppBackend == WhisperCppBenchmarkBackend.VULKAN ->
+                            Mode.WHISPER_CPP_Q5_0_VULKAN
+                        candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP ->
+                            Mode.WHISPER_CPP_Q5_0_CPU
                         candidateBackend == CANDIDATE_BACKEND_CPU && cpuWorkers == 1 ->
                             Mode.CPU_1X3
+                        candidateBackend == CANDIDATE_BACKEND_CPU && cpuWorkers == 4 ->
+                            Mode.CPU_4X3
                         candidateBackend == CANDIDATE_BACKEND_CPU -> Mode.CPU_2X3
                         gpuPrecisionName == GPU_PRECISION_FP16_FP32_ACCUM ->
                             Mode.FULL_GPU_FP16_FP32_ACCUM_NO_SOURCE_QUANT
@@ -184,15 +259,21 @@ class GpuWholeMemoWerBenchmarkTest {
                     },
                     language = requestedLanguage,
                     openEngines = {
-                        if (candidateBackend == CANDIDATE_BACKEND_CPU) {
-                            openCpuEngines(
+                        when (candidateBackend) {
+                            CANDIDATE_BACKEND_WHISPER_CPP -> listOf(
+                                WhisperCppBenchmarkEngine.open(
+                                    modelFile = requireNotNull(externalModelFile),
+                                    threadCount = whisperCppThreads,
+                                    backend = whisperCppBackend,
+                                ),
+                            )
+                            CANDIDATE_BACKEND_CPU -> openCpuEngines(
                                 context = context,
                                 workerCount = cpuWorkers,
                                 threadCount = cpuThreads,
                                 modelFilePath = externalModelPath,
                             )
-                        } else {
-                            listOf(
+                            else -> listOf(
                                 LiteRtFullGpuWhisperEngine.open(
                                     context = context,
                                     allowSourceQuantizedFcConvOps = false,
@@ -587,6 +668,14 @@ class GpuWholeMemoWerBenchmarkTest {
             tokenSelection = "CPU",
             neuralModelStrictlyGpuOnly = false,
         ),
+        CPU_4X3(
+            id = "cpu-4x3",
+            frontend = "CPU",
+            encoder = "CPU_XNNPACK",
+            decoder = "CPU_XNNPACK",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
         CPU_1X3(
             id = "cpu-1x3",
             frontend = "CPU",
@@ -651,6 +740,54 @@ class GpuWholeMemoWerBenchmarkTest {
             tokenSelection = "CPU",
             neuralModelStrictlyGpuOnly = true,
         ),
+        WHISPER_CPP_Q5_0_CPU(
+            id = "whisper.cpp-large-v3-turbo-q5_0-cpu",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_Q5_0_CPU",
+            decoder = "WHISPER_CPP_GGML_Q5_0_CPU",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        WHISPER_CPP_Q5_0_VULKAN(
+            id = "whisper.cpp-large-v3-turbo-q5_0-vulkan",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_Q5_0_VULKAN_WITH_CPU_FALLBACK_OPS",
+            decoder = "WHISPER_CPP_GGML_Q5_0_VULKAN_WITH_CPU_FALLBACK_OPS",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        WHISPER_CPP_Q8_0_CPU(
+            id = "whisper.cpp-large-v3-turbo-q8_0-cpu",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_Q8_0_CPU",
+            decoder = "WHISPER_CPP_GGML_Q8_0_CPU",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        WHISPER_CPP_Q8_0_VULKAN(
+            id = "whisper.cpp-large-v3-turbo-q8_0-vulkan",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_Q8_0_VULKAN_WITH_CPU_FALLBACK_OPS",
+            decoder = "WHISPER_CPP_GGML_Q8_0_VULKAN_WITH_CPU_FALLBACK_OPS",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        WHISPER_CPP_FP16_CPU(
+            id = "whisper.cpp-large-v3-turbo-fp16-cpu",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_FP16_CPU",
+            decoder = "WHISPER_CPP_GGML_FP16_CPU",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        WHISPER_CPP_FP16_VULKAN(
+            id = "whisper.cpp-large-v3-turbo-fp16-vulkan",
+            frontend = "WHISPER_CPP_CPU",
+            encoder = "WHISPER_CPP_GGML_FP16_VULKAN_WITH_CPU_FALLBACK_OPS",
+            decoder = "WHISPER_CPP_GGML_FP16_VULKAN_WITH_CPU_FALLBACK_OPS",
+            tokenSelection = "WHISPER_CPP_CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
         ;
 
         fun coverageJson(): JSONObject = JSONObject()
@@ -707,6 +844,8 @@ class GpuWholeMemoWerBenchmarkTest {
         private const val ARG_CANDIDATE_BACKEND = "candidateBackend"
         private const val ARG_CPU_WORKERS = "cpuWorkers"
         private const val ARG_CPU_THREADS = "cpuThreads"
+        private const val ARG_WHISPER_CPP_THREADS = "whisperCppThreads"
+        private const val ARG_WHISPER_CPP_BACKEND = "whisperCppBackend"
         private const val ARG_EXTERNAL_MODEL_NAME = "externalModelName"
         private const val ARG_EXTERNAL_MODEL_SHA256 = "externalModelSha256"
         private const val ARG_EXTERNAL_AUDIO_NAME = "externalAudioName"
@@ -718,6 +857,7 @@ class GpuWholeMemoWerBenchmarkTest {
             "whisper-full-float-decoder/decoder.tflite"
         private const val REPORT_DIRECTORY = "gpu-wer"
         private const val EXTERNAL_MODEL_DIRECTORY = "gpu-models"
+        private const val WHISPER_CPP_MODEL_DIRECTORY = "whispercpp-models"
         private const val EXTERNAL_AUDIO_DIRECTORY = "gpu-audio"
         private const val STATUS_RUNNING = "running"
         private const val STATUS_COMPLETED = "completed"
@@ -726,6 +866,7 @@ class GpuWholeMemoWerBenchmarkTest {
         private const val GPU_PRECISION_FP16_FP32_ACCUM = "fp16-fp32-accum"
         private const val CANDIDATE_BACKEND_GPU = "gpu"
         private const val CANDIDATE_BACKEND_CPU = "cpu"
+        private const val CANDIDATE_BACKEND_WHISPER_CPP = "whispercpp"
         private val WORD_PATTERN =
             Regex("""[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*""")
         private val SAFE_FILE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,127}""")
@@ -812,6 +953,19 @@ class GpuWholeMemoWerBenchmarkTest {
 
         private fun elapsedMillis(startedNanos: Long): Long =
             (System.nanoTime() - startedNanos) / 1_000_000L
+
+        private fun sha256(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
 
         private fun requireArgument(value: String?, label: String): String {
             val result = value?.trim().orEmpty()

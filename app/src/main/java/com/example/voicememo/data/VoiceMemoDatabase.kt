@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TranscriptionJob::class,
         MemoSearchFts::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -40,6 +40,7 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
+                    MIGRATION_6_7,
                 )
                 .build()
 
@@ -108,6 +109,26 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE `projects` ADD COLUMN `isArchived` " +
                         "INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Existing titles may have been edited, so migration defaults
+                // fail closed and never lets the model overwrite them.
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `titleEditedByUser` " +
+                        "INTEGER NOT NULL DEFAULT 1",
+                )
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `generatedSummary` TEXT",
+                )
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `metadataGeneratedAtMillis` INTEGER",
+                )
+                db.execSQL(
+                    "ALTER TABLE `memos` ADD COLUMN `metadataModelId` TEXT",
                 )
             }
         }

@@ -134,6 +134,33 @@ class VoiceMemoDatabaseMigrationTest {
         assertFalse(normalizedSql.contains("DELETE "))
     }
 
+    @Test
+    fun migrationSixToSevenPreservesLegacyTitlesAndAddsGeneratedMetadata() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_6_7.migrate(database)
+
+        assertEquals(4, executedSql.size)
+        val normalizedSql = executedSql.joinToString("\n").uppercase()
+        assertTrue(
+            normalizedSql.contains(
+                "ADD COLUMN `TITLEEDITEDBYUSER` INTEGER NOT NULL DEFAULT 1",
+            ),
+        )
+        assertTrue(normalizedSql.contains("ADD COLUMN `GENERATEDSUMMARY` TEXT"))
+        assertTrue(normalizedSql.contains("ADD COLUMN `METADATAGENERATEDATMILLIS` INTEGER"))
+        assertTrue(normalizedSql.contains("ADD COLUMN `METADATAMODELID` TEXT"))
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+    }
+
     private fun defaultValue(type: Class<*>): Any? = when (type) {
         java.lang.Boolean.TYPE -> false
         java.lang.Byte.TYPE -> 0.toByte()

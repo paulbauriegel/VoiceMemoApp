@@ -2,6 +2,7 @@
 .kotlin/
 .idea/
 build/
+app/.cxx/
 **/build/
 local.properties
 *.iml

@@ -107,6 +107,62 @@ and removes the temporary device copies afterward. Reports are written under
 five-second windows and a fuzzy word-boundary merger because this graph does
 not expose token timestamps.
 
+whisper.cpp large-v3-turbo Q5_0, Q8_0, and FP16 are also available as benchmark-only
+Vulkan/CPU models. They are not compiled into normal APKs, do not appear in
+the app's model selector, and the selected GGML model is staged in app-private
+storage only for an explicit run:
+
+```sh
+scripts/fetch-whisper-cpp-benchmark.sh all fp16
+scripts/run-whisper-cpp-benchmark.sh run \
+  --memo-id MEMO_ID \
+  --model fp16 \
+  --backend vulkan \
+  --threads 4
+```
+
+The runner defaults to Q5_0 and Vulkan and rejects silent CPU fallback. Pass
+`--model q8_0` for the 8-bit comparison, `--model fp16` for the unquantized
+FP16 comparison, or `--backend cpu` only for an explicit CPU comparison.
+
+The native source is pinned to whisper.cpp `v1.9.1` commit
+`f049fff95a089aa9969deb009cdd4892b3e74916`. Q5_0 is
+`ggml-large-v3-turbo-q5_0.bin`, 574,041,195 bytes, SHA-256
+`394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2`;
+Q8_0 is `ggml-large-v3-turbo-q8_0.bin`, 874,188,075 bytes, SHA-256
+`317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`;
+FP16 is `ggml-large-v3-turbo.bin`, 1,624,555,275 bytes, SHA-256
+`1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`.
+The runner builds whisper.cpp with `GGML_VULKAN=ON` under
+`-PincludeWhisperCppBenchmark=true`, installs both APKs
+in place, verifies the staged model again on-device, reads the selected memo
+without persisting output, and removes the staged device model after a
+successful run. Its JSON report uses the existing whole-memo timing, chunk,
+memory, and transcript schema. Candidate-only reports measure performance and
+output but do not establish WER unless compared with a separately saved
+reference transcript.
+
+For a controlled comparison of the six current reference configurations, run
+the three-repeat suite:
+
+```sh
+scripts/run-whisper-benchmark-suite.py plan
+scripts/run-whisper-benchmark-suite.py run \
+  --serial DEVICE_SERIAL \
+  --suite-id SUITE_ID
+```
+
+The suite runs whisper.cpp FP16 Vulkan, whisper.cpp Q8_0 Vulkan, LiteRT INT8
+CPU/XNNPACK with 2 workers × 3 threads and 4 workers × 3 threads, LiteRT
+FP16-storage OpenCL, and the LiteRT quantized-encoder/FLOAT32-decoder OpenCL
+model. The old LiteRT INT8 1-worker × 3-thread row is deliberately excluded.
+Every backend receives the same reference WAV and forced German language
+token, each repeat starts at Android thermal status 0, and raw
+text/tokens/timings plus host-recalculated WER evidence are stored under
+`build/reports/whisper-benchmark-suite/SUITE_ID/`. If a run is interrupted,
+repeat the command with `--resume`; existing reports and hashes are validated
+before the next missing run starts.
+
 The default build uses two parallel Whisper interpreters with three
 CPU/XNNPACK threads each. It does not create a GPU delegate. Every
 transcription writes a content-free benchmark report to app-private storage
@@ -205,11 +261,47 @@ targeted FLOAT32 projection rewrites distinguish two additional faults:
 - The exact production INT8 K `FULLY_CONNECTED`, given the same
   CPU-normalized input, still differs by 0.00598037 at step 7. This reproduces
   the full-prefix K divergence.
+- A compact standalone regression now reproduces that projection without
+  loading the 1.1 GB decoder:
+
+  ```sh
+  scripts/run-whisper-int8-fc-regression.sh --serial DEVICE_SERIAL
+  ```
+
+  It derives a fixed `[1,128,1280]` step-7 activation from the pinned model,
+  verifies its SHA-256, packages only the 1.65 MB K-projection graph, and runs
+  CPU plus six OpenCL configurations. On the Pixel 7 Pro, direct INT8 FC
+  measured `0.00597990` active-row maximum error; every source-quantized
+  configuration measured `0.03858685`, independent of default, buffer,
+  texture, or weight-storage preference. The generated ML Drift caches expose
+  three binding families: direct dequantize-to-float FC, source-quantized
+  IMAGE2D FC/Conv, and source-quantized BUFFER FC/Conv. The Maven accelerator
+  strips the implementation RTTI, so `ConvWaveMatrixMali` versus
+  `ConvWaveMatrix`/`ConvWaveMemory` is deliberately reported as unknown until
+  the source-built diagnostic logger is available.
+- A second compact arithmetic matrix separates FC accumulation from dynamic
+  activation quantization:
+
+  ```sh
+  scripts/run-whisper-int8-fc-arithmetic-matrix.sh --serial DEVICE_SERIAL
+  ```
+
+  It tests seven pinned per-channel, per-tensor, explicit-zero-point,
+  synthetic, and FLOAT32 models against real and controlled activations. On
+  the Pixel 7 Pro, closed-form diagonal and accumulation oracles measured
+  maximum errors of `0.0125490` for CPU hybrid quantization, `0.00004935` for
+  direct GPU FC, and `0.0250592` for source-quantized GPU FC. The direct GPU
+  accumulator is therefore mathematically sound. The source-quantized error
+  is proportional to the quantized weight-row sum, and its normalized slope is
+  `1/510`: exactly half of one 8-bit activation quantization step. The remaining
+  parity target is ML Drift's `quantize_float32_to_int8w4c4` scale/offset
+  contract, not the FC dot-product kernel or weight zero-point metadata.
 - Dequantizing only the first K matrix reduces its step-7 active-row maximum
   from 0.00598037 to 3.58e-7. Dequantizing first-block K/Q/V/output matrices
   similarly keeps Q and V near 1e-7 and the attention score BMM at 1.43e-6.
-  This confirms a LiteRT GPU per-channel INT8 `FULLY_CONNECTED` correctness
-  problem rather than ordinary autoregressive floating-point drift.
+  This removes the CPU/GPU hybrid-quantization contract mismatch; the
+  arithmetic matrix above shows that the underlying direct GPU FC accumulator
+  itself is not faulty.
 - Even with those four FLOAT32 projections, the integrated causal-mask output
   was wrong on valid (unmasked) logits: step-7 maximum 2.81293 and mean
   absolute error 0.42248. Running the identical CPU score tensor and causal

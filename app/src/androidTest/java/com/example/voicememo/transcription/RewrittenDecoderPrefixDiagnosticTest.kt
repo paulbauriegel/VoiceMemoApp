@@ -16,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.security.MessageDigest
 import kotlin.math.sqrt
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -73,6 +74,10 @@ class RewrittenDecoderPrefixDiagnosticTest {
             arguments.getString(ARG_RUN_ISOLATED_VALUE)
                 ?.toBooleanStrictOrNull()
                 ?: false
+        val captureKProjectionInput =
+            arguments.getString(ARG_CAPTURE_K_PROJECTION_INPUT)
+                ?.toBooleanStrictOrNull()
+                ?: false
         val reportDirectory =
             File(targetContext.cacheDir, REPORT_DIRECTORY).apply { mkdirs() }
         val reportFile = File(reportDirectory, "prefix-$runId.json")
@@ -93,6 +98,7 @@ class RewrittenDecoderPrefixDiagnosticTest {
             .put("run_isolated_score", runIsolatedScore)
             .put("capture_isolated_value", captureIsolatedValue)
             .put("run_isolated_value", runIsolatedValue)
+            .put("capture_k_projection_input", captureKProjectionInput)
             .put("persisted_output", false)
             .put("model_sha256", WhisperAssets.MODEL_SHA256)
             .put("requested_steps", JSONArray(requestedSteps))
@@ -179,6 +185,28 @@ class RewrittenDecoderPrefixDiagnosticTest {
 
             val isolationDirectory =
                 File(reportDirectory, ISOLATION_DIRECTORY).apply { mkdirs() }
+            if (captureKProjectionInput) {
+                require(stage == "after-self-layer-norm") {
+                    "K-projection input capture requires after-self-layer-norm."
+                }
+                val captureIndex = inputs.indexOfFirst { it.step == K_PROJECTION_FIXTURE_STEP }
+                require(captureIndex >= 0) {
+                    "K-projection input capture requires step $K_PROJECTION_FIXTURE_STEP."
+                }
+                val fixtureFile = File(
+                    isolationDirectory,
+                    K_PROJECTION_FIXTURE_FILE,
+                )
+                writeFloatFile(fixtureFile, cpuResults[captureIndex].values)
+                report.put(
+                    "k_projection_input_fixture",
+                    JSONObject()
+                        .put("step", K_PROJECTION_FIXTURE_STEP)
+                        .put("relative_path", "$ISOLATION_DIRECTORY/$K_PROJECTION_FIXTURE_FILE")
+                        .put("byte_count", fixtureFile.length())
+                        .put("sha256", sha256(fixtureFile)),
+                )
+            }
             if (captureIsolatedKey) {
                 require(stage == "after-self-key-transpose") {
                     "Key capture requires after-self-key-transpose."
@@ -790,9 +818,13 @@ class RewrittenDecoderPrefixDiagnosticTest {
         private const val ARG_RUN_ISOLATED_SCORE = "runIsolatedScore"
         private const val ARG_CAPTURE_ISOLATED_VALUE = "captureIsolatedValue"
         private const val ARG_RUN_ISOLATED_VALUE = "runIsolatedValue"
+        private const val ARG_CAPTURE_K_PROJECTION_INPUT = "captureKProjectionInput"
         private const val DEFAULT_STEPS = "0,7"
         private const val REPORT_DIRECTORY = "gpu-prefix"
         private const val ISOLATION_DIRECTORY = "isolation"
+        private const val K_PROJECTION_FIXTURE_STEP = 7
+        private const val K_PROJECTION_FIXTURE_FILE =
+            "whisper-first-block-k-projection-step-7-input.f32"
         private const val STATUS_COMPLETED = "completed"
         private const val STATUS_FAILED = "failed"
     }
@@ -1568,6 +1600,19 @@ private fun writeFloatFile(file: File, values: FloatArray) {
     check(temporary.renameTo(file)) {
         "Could not publish isolated score key input."
     }
+}
+
+private fun sha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { stream ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
 
 private fun readFloatFile(file: File, expectedElements: Int): FloatArray {

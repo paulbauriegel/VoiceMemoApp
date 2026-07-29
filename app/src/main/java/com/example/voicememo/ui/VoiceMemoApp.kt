@@ -37,11 +37,14 @@ fun VoiceMemoApp(
     uiState: VoiceMemoAppUiState,
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean? = null,
     dynamicColor: Boolean = false,
 ) {
+    val resolvedDarkTheme = darkTheme ?: uiState.appearanceMode.resolveDarkTheme(
+        isSystemInDarkTheme(),
+    )
     VoiceMemoTheme(
-        darkTheme = darkTheme,
+        darkTheme = resolvedDarkTheme,
         dynamicColor = dynamicColor,
     ) {
         Surface(
@@ -174,6 +177,7 @@ private fun VoiceMemoAdaptiveContent(
                     isExportingBackup = uiState.isExportingBackup,
                     isRestoringBackup = uiState.isRestoringBackup,
                     showRestoreBackupConfirmation = uiState.showRestoreBackupConfirmation,
+                    appearanceMode = uiState.appearanceMode,
                     transcriptionTimestampsEnabled =
                         uiState.transcriptionTimestampsEnabled,
                     voiceActivityDetectionEnabled =

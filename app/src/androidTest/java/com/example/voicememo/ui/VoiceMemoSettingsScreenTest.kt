@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.example.voicememo.settings.AppearanceMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -19,6 +20,29 @@ import org.junit.runner.RunWith
 class VoiceMemoSettingsScreenTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComposeTestHostActivity>()
+
+    @Test
+    fun appearanceRowsReflectSelectionAndDispatchModeChange() {
+        var lastAction: VoiceMemoUiAction? = null
+
+        composeRule.setContent {
+            VoiceMemoTheme(dynamicColor = false) {
+                VoiceMemoLicensesScreen(
+                    licenses = emptyList(),
+                    isImportingAudio = false,
+                    appearanceMode = AppearanceMode.SYSTEM,
+                    onAction = { lastAction = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Appearance").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings_appearance_dark").performClick()
+        assertEquals(
+            VoiceMemoUiAction.AppearanceModeChanged(AppearanceMode.DARK),
+            lastAction,
+        )
+    }
 
     @Test
     fun audioImportIsTheFirstSettingsSection() {

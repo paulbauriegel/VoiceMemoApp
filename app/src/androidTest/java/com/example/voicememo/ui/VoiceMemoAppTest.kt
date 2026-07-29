@@ -1,5 +1,8 @@
 package com.example.voicememo.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
@@ -271,6 +274,34 @@ class VoiceMemoAppTest {
     }
 
     @Test
+    fun metadataGenerationProgressAppearsOnlyInAudioView() {
+        var selectedSection by mutableStateOf(DetailSection.Audio)
+        val detail = VoiceMemoPreviewData.detail.copy(
+            isGeneratingMetadata = true,
+        )
+        composeRule.setContent {
+            VoiceMemoApp(
+                uiState = VoiceMemoPreviewData.appState.copy(
+                    destination = VoiceMemoDestination.Detail,
+                    detail = detail.copy(selectedSection = selectedSection),
+                ),
+                onAction = { action ->
+                    if (action is VoiceMemoUiAction.DetailSectionChanged) {
+                        selectedSection = action.section
+                    }
+                },
+                dynamicColor = false,
+            )
+        }
+
+        composeRule.onNodeWithTag("metadata_generation_progress").assertIsDisplayed()
+        composeRule.onNodeWithText("Creating title and summary").assertIsDisplayed()
+        composeRule.onNodeWithTag("detail_section_transcript").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("metadata_generation_progress").assertDoesNotExist()
+    }
+
+    @Test
     fun editedTranscriptExposesResetAction() {
         var lastAction: VoiceMemoUiAction? = null
         val detail = VoiceMemoPreviewData.detail.copy(
@@ -333,5 +364,46 @@ class VoiceMemoAppTest {
 
         composeRule.onNodeWithContentDescription("Skip forward 10 seconds").performClick()
         assertEquals(VoiceMemoUiAction.DetailSeekBy(10_000L), lastAction)
+    }
+
+    @Test
+    fun transcriptAutomaticallyScrollsToTheActiveSegment() {
+        val segments = (0 until 12).map { index ->
+            val startMillis = index * 10_000L
+            TranscriptSegmentUi(
+                id = "segment-$index",
+                startMillis = startMillis,
+                endMillis = startMillis + 10_000L,
+                startLabel = "segment $index",
+                endLabel = "",
+                text = "Transcript line $index",
+            )
+        }
+        var playbackPositionMillis by mutableStateOf(0L)
+
+        composeRule.setContent {
+            VoiceMemoApp(
+                uiState = VoiceMemoPreviewData.appState.copy(
+                    destination = VoiceMemoDestination.Detail,
+                    detail = VoiceMemoPreviewData.detail.copy(
+                        durationMillis = 120_000L,
+                        playbackPositionMillis = playbackPositionMillis,
+                        playbackFraction = playbackPositionMillis / 120_000f,
+                        transcript = VoiceMemoPreviewData.detail.transcript.copy(
+                            segments = segments,
+                        ),
+                    ),
+                ),
+                onAction = {},
+                dynamicColor = false,
+            )
+        }
+
+        composeRule.runOnIdle {
+            playbackPositionMillis = 110_000L
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Transcript line 11").assertIsDisplayed()
     }
 }

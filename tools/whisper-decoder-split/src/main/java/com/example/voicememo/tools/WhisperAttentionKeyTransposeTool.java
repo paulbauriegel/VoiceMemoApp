@@ -97,6 +97,9 @@ public final class WhisperAttentionKeyTransposeTool {
       FIRST_BLOCK_K_CHANNELS * FIRST_BLOCK_K_CHANNELS;
   private static final long FIRST_BLOCK_FLOAT_K_WEIGHT_BYTES =
       (long) FIRST_BLOCK_K_WEIGHT_ELEMENTS * Float.BYTES;
+  private static final long K_PROJECTION_PROBE_SIZE = 1_654_640L;
+  private static final String K_PROJECTION_PROBE_SHA256 =
+      "7a30331ccb89e332edb176587d149f8d852e5b224864247defadae37db940b1d";
   private static final FloatProjectionSpec[] FIRST_BLOCK_SELF_ATTENTION_PROJECTIONS = {
       new FloatProjectionSpec(
           "k",
@@ -221,6 +224,12 @@ public final class WhisperAttentionKeyTransposeTool {
         generateKProjectionProbe(
             Path.of(args[1]).toAbsolutePath().normalize(),
             Path.of(args[2]).toAbsolutePath().normalize());
+      } else if (
+          args.length == 3
+              && "generate-k-projection-arithmetic-probes".equals(args[0])) {
+        generateKProjectionArithmeticProbes(
+            Path.of(args[1]).toAbsolutePath().normalize(),
+            Path.of(args[2]).toAbsolutePath().normalize());
       } else if (args.length == 3 && "generate".equals(args[0])) {
         generate(
             Path.of(args[1]).toAbsolutePath().normalize(),
@@ -267,6 +276,8 @@ public final class WhisperAttentionKeyTransposeTool {
                 + "OUTPUT\n"
                 + "   or: WhisperAttentionKeyTransposeTool generate-k-projection-probe "
                 + "SOURCE OUTPUT\n"
+                + "   or: WhisperAttentionKeyTransposeTool "
+                + "generate-k-projection-arithmetic-probes PROBE OUTPUT_DIRECTORY\n"
                 + "   or: WhisperAttentionKeyTransposeTool generate SOURCE OUTPUT\n"
                 + "   or: WhisperAttentionKeyTransposeTool generate-verified "
                 + "SOURCE EXPECTED_SHA256 REWRITES_PER_SUBGRAPH OUTPUT\n"
@@ -3868,6 +3879,480 @@ public final class WhisperAttentionKeyTransposeTool {
     }
   }
 
+  private static void generateKProjectionArithmeticProbes(
+      Path source, Path outputDirectory) throws Exception {
+    require(
+        Files.isRegularFile(source)
+            && Files.size(source) == K_PROJECTION_PROBE_SIZE
+            && K_PROJECTION_PROBE_SHA256.equals(sha256(source)),
+        "Arithmetic probes require the pinned isolated K-projection model.");
+    require(
+        hasBuildPathSegment(outputDirectory),
+        "Arithmetic probes must stay under a build directory.");
+    Files.createDirectories(outputDirectory);
+
+    List<String> manifest = new ArrayList<>();
+    manifest.add(
+        "name\tmodel_sha256\tmodel_bytes\tweight_type\tscale_count"
+            + "\tzero_point_count\tscales_sha256\tsums_sha256");
+    try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
+      ByteBuffer bytes =
+          channel
+              .map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
+              .order(ByteOrder.LITTLE_ENDIAN);
+      Model sourceModel = parseModel(bytes);
+      SubGraph graph = sourceModel.subgraphs(0);
+      Operator projection = graph.operators(0);
+      OperatorCode sourceCode =
+          sourceModel.operatorCodes(Math.toIntExact(projection.opcodeIndex()));
+      Tensor weight = graph.tensors(1);
+      QuantizationParameters quantization = weight.quantization();
+      require(
+          weight.type() == TensorType.INT8
+              && Arrays.equals(
+                  tensorShape(weight),
+                  new int[] {FIRST_BLOCK_K_CHANNELS, FIRST_BLOCK_K_CHANNELS})
+              && quantization != null
+              && quantization.detailsType() == QuantizationDetails.NONE
+              && quantization.quantizedDimension() == 0
+              && quantization.scaleLength() == FIRST_BLOCK_K_CHANNELS
+              && (quantization.zeroPointLength() == 0
+                  || quantization.zeroPointLength() == 1
+                  || quantization.zeroPointLength() == FIRST_BLOCK_K_CHANNELS),
+          "Pinned K-projection quantization contract changed.");
+      ByteBuffer weightBuffer =
+          sourceModel
+              .buffers(Math.toIntExact(weight.buffer()))
+              .dataAsByteBuffer()
+              .duplicate();
+      require(
+          weightBuffer.remaining() == FIRST_BLOCK_K_WEIGHT_ELEMENTS,
+          "Pinned K-projection weight size changed.");
+      byte[] original = new byte[FIRST_BLOCK_K_WEIGHT_ELEMENTS];
+      weightBuffer.get(original);
+      float[] originalScales = new float[FIRST_BLOCK_K_CHANNELS];
+      long[] originalZeroPoints =
+          new long[quantization.zeroPointLength()];
+      for (int index = 0; index < FIRST_BLOCK_K_CHANNELS; index++) {
+        originalScales[index] = quantization.scale(index);
+      }
+      for (int index = 0; index < originalZeroPoints.length; index++) {
+        originalZeroPoints[index] = quantization.zeroPoint(index);
+      }
+      float[] dequantized =
+          dequantizeProjectionWeights(
+              original, originalScales, originalZeroPoints);
+      float maximumAbsoluteWeight = 0.0f;
+      for (float value : dequantized) {
+        maximumAbsoluteWeight =
+            Math.max(maximumAbsoluteWeight, Math.abs(value));
+      }
+      require(maximumAbsoluteWeight > 0.0f, "K-projection weights are all zero.");
+      float perTensorScale = maximumAbsoluteWeight / 127.0f;
+      byte[] requantized =
+          quantizeProjectionWeights(dequantized, perTensorScale);
+      float[] uniformPerChannelScales =
+          new float[FIRST_BLOCK_K_CHANNELS];
+      Arrays.fill(uniformPerChannelScales, perTensorScale);
+      long[] explicitZeroPoints = new long[FIRST_BLOCK_K_CHANNELS];
+
+      byte[] diagonal = new byte[FIRST_BLOCK_K_WEIGHT_ELEMENTS];
+      float[] diagonalScales = new float[FIRST_BLOCK_K_CHANNELS];
+      for (int channelIndex = 0;
+          channelIndex < FIRST_BLOCK_K_CHANNELS;
+          channelIndex++) {
+        diagonal[
+            channelIndex * FIRST_BLOCK_K_CHANNELS + channelIndex] = 127;
+        diagonalScales[channelIndex] =
+            0.001f + channelIndex * 0.000001f;
+      }
+
+      byte[] accumulation = new byte[FIRST_BLOCK_K_WEIGHT_ELEMENTS];
+      float[] accumulationScales = new float[FIRST_BLOCK_K_CHANNELS];
+      Arrays.fill(accumulationScales, 0.01f);
+      int[] accumulationWidths =
+          new int[] {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1280};
+      for (int channelIndex = 0;
+          channelIndex < FIRST_BLOCK_K_CHANNELS;
+          channelIndex++) {
+        int width =
+            accumulationWidths[channelIndex % accumulationWidths.length];
+        Arrays.fill(
+            accumulation,
+            channelIndex * FIRST_BLOCK_K_CHANNELS,
+            channelIndex * FIRST_BLOCK_K_CHANNELS + width,
+            (byte) 1);
+      }
+
+      List<FcArithmeticVariant> variants =
+          List.of(
+              new FcArithmeticVariant(
+                  "original-per-channel",
+                  TensorType.INT8,
+                  original,
+                  originalScales,
+                  originalZeroPoints),
+              new FcArithmeticVariant(
+                  "original-explicit-zero-points",
+                  TensorType.INT8,
+                  original,
+                  originalScales,
+                  explicitZeroPoints),
+              new FcArithmeticVariant(
+                  "requantized-per-tensor",
+                  TensorType.INT8,
+                  requantized,
+                  new float[] {perTensorScale},
+                  new long[] {0}),
+              new FcArithmeticVariant(
+                  "requantized-uniform-per-channel",
+                  TensorType.INT8,
+                  requantized,
+                  uniformPerChannelScales,
+                  explicitZeroPoints),
+              new FcArithmeticVariant(
+                  "synthetic-diagonal-scale-ramp",
+                  TensorType.INT8,
+                  diagonal,
+                  diagonalScales,
+                  explicitZeroPoints),
+              new FcArithmeticVariant(
+                  "synthetic-accumulation-ladder",
+                  TensorType.INT8,
+                  accumulation,
+                  accumulationScales,
+                  explicitZeroPoints),
+              new FcArithmeticVariant(
+                  "float32-original-control",
+                  TensorType.FLOAT32,
+                  floatsToLittleEndianBytes(dequantized),
+                  new float[0],
+                  new long[0]));
+
+      for (FcArithmeticVariant variant : variants) {
+        Path modelOutput =
+            outputDirectory.resolve(variant.name() + ".tflite");
+        writeKProjectionArithmeticProbe(
+            projection, sourceCode.version(), variant, modelOutput);
+        verifyKProjectionArithmeticProbe(modelOutput, variant);
+
+        String scalesHash = "-";
+        String sumsHash = "-";
+        if (variant.weightType() == TensorType.INT8) {
+          float[] analysisScales =
+              expandScales(variant.scales());
+          int[] sums = quantizedRowSums(variant.weightData());
+          Path scalesOutput =
+              outputDirectory.resolve(variant.name() + ".scales.f32");
+          Path sumsOutput =
+              outputDirectory.resolve(variant.name() + ".sums.i32");
+          writeLittleEndianFloats(scalesOutput, analysisScales);
+          writeLittleEndianInts(sumsOutput, sums);
+          scalesHash = sha256(scalesOutput);
+          sumsHash = sha256(sumsOutput);
+        }
+        manifest.add(
+            variant.name()
+                + "\t"
+                + sha256(modelOutput)
+                + "\t"
+                + Files.size(modelOutput)
+                + "\t"
+                + variant.weightType()
+                + "\t"
+                + variant.scales().length
+                + "\t"
+                + variant.zeroPoints().length
+                + "\t"
+                + scalesHash
+                + "\t"
+                + sumsHash);
+      }
+    }
+    Path manifestOutput = outputDirectory.resolve("matrix-manifest.tsv");
+    Files.write(
+        manifestOutput,
+        manifest,
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+    System.out.println("output_directory=" + outputDirectory);
+    System.out.println("variants=" + (manifest.size() - 1));
+    System.out.println("manifest_sha256=" + sha256(manifestOutput));
+  }
+
+  private static void writeKProjectionArithmeticProbe(
+      Operator sourceProjection,
+      int fullyConnectedVersion,
+      FcArithmeticVariant variant,
+      Path output) throws Exception {
+    FlatBufferBuilder builder = new FlatBufferBuilder(
+        variant.weightData().length + 2 * 1024 * 1024);
+    int weightData =
+        Buffer.createDataVector(builder, ByteBuffer.wrap(variant.weightData()));
+    int emptyBuffer = Buffer.createBuffer(builder, 0);
+    int constantWeightBuffer = Buffer.createBuffer(builder, weightData);
+    int buffers =
+        Model.createBuffersVector(
+            builder, new int[] {emptyBuffer, constantWeightBuffer});
+
+    int weightQuantization = 0;
+    if (variant.weightType() == TensorType.INT8) {
+      int scales =
+          QuantizationParameters.createScaleVector(builder, variant.scales());
+      int zeroPoints =
+          variant.zeroPoints().length == 0
+              ? 0
+              : QuantizationParameters.createZeroPointVector(
+                  builder, variant.zeroPoints());
+      weightQuantization =
+          QuantizationParameters.createQuantizationParameters(
+              builder,
+              0,
+              0,
+              scales,
+              zeroPoints,
+              QuantizationDetails.NONE,
+              0,
+              0);
+    }
+    int hiddenTensor =
+        createTensor(
+            builder,
+            DECODER_HIDDEN_SHAPE,
+            TensorType.FLOAT32,
+            0,
+            "hidden",
+            0,
+            false,
+            null,
+            true,
+            true);
+    int weightTensor =
+        createTensor(
+            builder,
+            new int[] {FIRST_BLOCK_K_CHANNELS, FIRST_BLOCK_K_CHANNELS},
+            variant.weightType(),
+            1,
+            "weight/" + variant.name(),
+            weightQuantization,
+            false,
+            null,
+            true,
+            true);
+    int outputTensor =
+        createTensor(
+            builder,
+            DECODER_HIDDEN_SHAPE,
+            TensorType.FLOAT32,
+            0,
+            "key",
+            0,
+            false,
+            null,
+            true,
+            true);
+    int tensors =
+        SubGraph.createTensorsVector(
+            builder, new int[] {hiddenTensor, weightTensor, outputTensor});
+    int options = cloneBuiltinOptions(builder, sourceProjection, false);
+    int projection =
+        createOperator(
+            builder,
+            0,
+            new int[] {0, 1, -1},
+            new int[] {2},
+            sourceProjection.builtinOptionsType(),
+            options,
+            new byte[0],
+            sourceProjection.customOptionsFormat(),
+            new boolean[0],
+            new int[0]);
+    int operators =
+        SubGraph.createOperatorsVector(builder, new int[] {projection});
+    int graphInputs = SubGraph.createInputsVector(builder, new int[] {0});
+    int graphOutputs = SubGraph.createOutputsVector(builder, new int[] {2});
+    int graph =
+        SubGraph.createSubGraph(
+            builder,
+            tensors,
+            graphInputs,
+            graphOutputs,
+            operators,
+            builder.createString("k_projection_" + variant.name()));
+
+    int signatureInput =
+        TensorMap.createTensorMap(builder, builder.createString("hidden"), 0);
+    int signatureOutput =
+        TensorMap.createTensorMap(builder, builder.createString("key"), 2);
+    int signature =
+        SignatureDef.createSignatureDef(
+            builder,
+            SignatureDef.createInputsVector(
+                builder, new int[] {signatureInput}),
+            SignatureDef.createOutputsVector(
+                builder, new int[] {signatureOutput}),
+            builder.createString("k_projection"),
+            0);
+    int opcode =
+        OperatorCode.createOperatorCode(
+            builder,
+            (byte) BuiltinOperator.FULLY_CONNECTED,
+            0,
+            fullyConnectedVersion,
+            BuiltinOperator.FULLY_CONNECTED);
+    int model =
+        Model.createModel(
+            builder,
+            3,
+            Model.createOperatorCodesVector(builder, new int[] {opcode}),
+            Model.createSubgraphsVector(builder, new int[] {graph}),
+            builder.createString(
+                "VoiceMemo INT8 FC arithmetic probe " + variant.name()),
+            buffers,
+            0,
+            0,
+            Model.createSignatureDefsVector(
+                builder, new int[] {signature}));
+    Model.finishModelBuffer(builder, model);
+    Files.write(
+        output,
+        builder.sizedByteArray(),
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+  }
+
+  private static void verifyKProjectionArithmeticProbe(
+      Path output, FcArithmeticVariant variant) throws Exception {
+    try (FileChannel channel = FileChannel.open(output, StandardOpenOption.READ)) {
+      ByteBuffer bytes =
+          channel
+              .map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
+              .order(ByteOrder.LITTLE_ENDIAN);
+      Model model = parseModel(bytes);
+      SubGraph graph = model.subgraphs(0);
+      require(
+          model.subgraphsLength() == 1
+              && model.operatorCodesLength() == 1
+              && model.operatorCodes(0).builtinCode()
+                  == BuiltinOperator.FULLY_CONNECTED
+              && graph.operatorsLength() == 1,
+          "Arithmetic probe operator contract changed.");
+      Tensor weight = graph.tensors(1);
+      require(
+          weight.type() == variant.weightType()
+              && Arrays.equals(
+                  tensorShape(weight),
+                  new int[] {FIRST_BLOCK_K_CHANNELS, FIRST_BLOCK_K_CHANNELS})
+              && model.buffers(
+                      Math.toIntExact(weight.buffer()))
+                  .dataLength()
+                  == variant.weightData().length,
+          "Arithmetic probe weight contract changed.");
+      QuantizationParameters quantization = weight.quantization();
+      if (variant.weightType() == TensorType.INT8) {
+        require(
+            quantization != null
+                && quantization.scaleLength() == variant.scales().length
+                && quantization.zeroPointLength()
+                    == variant.zeroPoints().length
+                && quantization.quantizedDimension() == 0,
+            "Arithmetic probe quantization contract changed.");
+      } else {
+        require(
+            quantization == null || quantization.scaleLength() == 0,
+            "FLOAT32 control unexpectedly has active quantization.");
+      }
+      requireSignature(model, "k_projection");
+    }
+  }
+
+  private static float[] dequantizeProjectionWeights(
+      byte[] weights, float[] scales, long[] zeroPoints) {
+    float[] result = new float[weights.length];
+    for (int row = 0; row < FIRST_BLOCK_K_CHANNELS; row++) {
+      long zeroPoint =
+          zeroPoints.length == 0
+              ? 0
+              : zeroPoints[Math.min(row, zeroPoints.length - 1)];
+      float scale = scales[Math.min(row, scales.length - 1)];
+      int offset = row * FIRST_BLOCK_K_CHANNELS;
+      for (int column = 0; column < FIRST_BLOCK_K_CHANNELS; column++) {
+        result[offset + column] =
+            (weights[offset + column] - zeroPoint) * scale;
+      }
+    }
+    return result;
+  }
+
+  private static byte[] quantizeProjectionWeights(
+      float[] weights, float scale) {
+    byte[] result = new byte[weights.length];
+    for (int index = 0; index < weights.length; index++) {
+      int quantized = Math.round(weights[index] / scale);
+      result[index] = (byte) Math.max(-127, Math.min(127, quantized));
+    }
+    return result;
+  }
+
+  private static byte[] floatsToLittleEndianBytes(float[] values) {
+    ByteBuffer result =
+        ByteBuffer.allocate(values.length * Float.BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN);
+    result.asFloatBuffer().put(values);
+    return result.array();
+  }
+
+  private static float[] expandScales(float[] scales) {
+    float[] result = new float[FIRST_BLOCK_K_CHANNELS];
+    for (int index = 0; index < result.length; index++) {
+      result[index] = scales[Math.min(index, scales.length - 1)];
+    }
+    return result;
+  }
+
+  private static int[] quantizedRowSums(byte[] weights) {
+    int[] result = new int[FIRST_BLOCK_K_CHANNELS];
+    for (int row = 0; row < FIRST_BLOCK_K_CHANNELS; row++) {
+      int offset = row * FIRST_BLOCK_K_CHANNELS;
+      int sum = 0;
+      for (int column = 0; column < FIRST_BLOCK_K_CHANNELS; column++) {
+        sum += weights[offset + column];
+      }
+      result[row] = sum;
+    }
+    return result;
+  }
+
+  private static void writeLittleEndianFloats(
+      Path output, float[] values) throws IOException {
+    ByteBuffer bytes =
+        ByteBuffer.allocate(values.length * Float.BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN);
+    bytes.asFloatBuffer().put(values);
+    Files.write(
+        output,
+        bytes.array(),
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+  }
+
+  private static void writeLittleEndianInts(
+      Path output, int[] values) throws IOException {
+    ByteBuffer bytes =
+        ByteBuffer.allocate(values.length * Integer.BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN);
+    bytes.asIntBuffer().put(values);
+    Files.write(
+        output,
+        bytes.array(),
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+  }
+
   private static PrefixPatchLayout requireRewrittenPrefixContract(
       Model model, DecoderPrefixStage stage) {
     require(model.subgraphsLength() == 2, "Rewritten model subgraph count changed.");
@@ -4583,6 +5068,13 @@ public final class WhisperAttentionKeyTransposeTool {
       int biasTensor,
       int outputTensor,
       int weightBuffer) {}
+
+  private record FcArithmeticVariant(
+      String name,
+      byte weightType,
+      byte[] weightData,
+      float[] scales,
+      long[] zeroPoints) {}
 
   private record ProjectionSource(
       Tensor weight,

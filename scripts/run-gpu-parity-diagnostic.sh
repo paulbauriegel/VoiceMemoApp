@@ -227,6 +227,9 @@ Options:
                         Save CPU V for a following isolated value-BMM run.
   --run-isolated-value  Compare CPU/GPU attention-value BMM with identical
                         CPU probabilities and V.
+  --capture-k-projection-input
+                        Save the exact CPU layer-normalized step-7 tensor used
+                        by the standalone INT8 K-projection regression.
   --full-float-decoder  Whole-memo mode: use the complete FLOAT32 decoder
                         with all four causal-mask rank barriers.
   --promotion-gate      Whole-memo mode: run only CPU and the complete
@@ -663,6 +666,7 @@ if [[ "$subcommand" == "prefix" ]]; then
   run_isolated_score=false
   capture_isolated_value=false
   run_isolated_value=false
+  capture_k_projection_input=false
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --memo-id)
@@ -729,6 +733,10 @@ if [[ "$subcommand" == "prefix" ]]; then
         run_isolated_value=true
         shift
         ;;
+      --capture-k-projection-input)
+        capture_k_projection_input=true
+        shift
+        ;;
       --serial)
         [[ "$#" -ge 2 ]] || fail "--serial requires a value."
         device_serial="$2"
@@ -791,6 +799,12 @@ if [[ "$subcommand" == "prefix" ]]; then
   if [[ "$capture_isolated_value" == true ]]; then
     [[ "$prefix_stage" == "after-self-value-reshape" ]] ||
       fail "--capture-isolated-value requires --prefix-stage after-self-value-reshape."
+  fi
+  if [[ "$capture_k_projection_input" == true ]]; then
+    [[ "$prefix_stage" == "after-self-layer-norm" ]] ||
+      fail "--capture-k-projection-input requires --prefix-stage after-self-layer-norm."
+    [[ ",$prefix_steps," == *",7,"* ]] ||
+      fail "--capture-k-projection-input requires step 7 in --prefix-steps."
   fi
   if [[ "$run_isolated_value" == true ]]; then
     [[ "$prefix_stage" == "after-self-softmax" ]] ||
@@ -883,6 +897,7 @@ if [[ "$subcommand" == "prefix" ]]; then
     -e runIsolatedScore "$run_isolated_score" \
     -e captureIsolatedValue "$capture_isolated_value" \
     -e runIsolatedValue "$run_isolated_value" \
+    -e captureKProjectionInput "$capture_k_projection_input" \
     -e class "$rewritten_prefix_test_class" \
     "$test_package_name/$runner_name" 2>&1 |
     tee "$output_directory/instrumentation.txt"
@@ -898,6 +913,30 @@ if [[ "$subcommand" == "prefix" ]]; then
   device_report="cache/gpu-prefix/prefix-$diagnostic_run_id.json"
   wait_for_device_report "$device_report" "$output_directory/report.json" ||
     fail "Timed out waiting for decoder-prefix report $diagnostic_run_id."
+  if [[ "$capture_k_projection_input" == true ]]; then
+    fixture_name="whisper-first-block-k-projection-step-7-input.f32"
+    device_fixture="cache/gpu-prefix/isolation/$fixture_name"
+    fixture_destination="$output_directory/$fixture_name"
+    fixture_partial="${fixture_destination}.partial"
+    adb_command exec-out run-as "$package_name" cat "$device_fixture" \
+      >"$fixture_partial" ||
+      fail "Could not pull the captured K-projection input fixture."
+    [[ "$(wc -c <"$fixture_partial" | tr -d ' ')" == "655360" ]] ||
+      fail "Captured K-projection input has the wrong byte count."
+    expected_fixture_sha="$(
+      python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))[
+    "k_projection_input_fixture"
+]["sha256"])
+' "$output_directory/report.json"
+    )"
+    actual_fixture_sha="$(shasum -a 256 "$fixture_partial" | awk '{print $1}')"
+    [[ "$actual_fixture_sha" == "$expected_fixture_sha" ]] ||
+      fail "Captured K-projection input SHA-256 mismatch."
+    mv "$fixture_partial" "$fixture_destination"
+    echo "Saved exact K-projection input fixture: $fixture_destination"
+  fi
   python3 -c '
 import json, sys
 

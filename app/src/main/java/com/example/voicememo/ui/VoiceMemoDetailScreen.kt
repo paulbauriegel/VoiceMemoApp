@@ -18,11 +18,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -61,6 +64,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -153,6 +157,9 @@ fun VoiceMemoDetailScreen(
                             largeText = stackActions,
                             onAction = onAction,
                         )
+                        if (detail.isGeneratingMetadata) {
+                            MetadataGenerationProgress()
+                        }
                         WaveformPlayer(
                             detail = detail,
                             onAction = onAction,
@@ -189,6 +196,59 @@ fun VoiceMemoDetailScreen(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetadataGenerationProgress() {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("metadata_generation_progress")
+            .semantics {
+                contentDescription =
+                    "Creating title and summary with Granite on this device"
+            },
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.size(40.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(40.dp),
+                    strokeWidth = 3.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "Creating title and summary",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    text = "Granite is running locally on this device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
             }
         }
     }
@@ -241,6 +301,15 @@ private fun EditableTitle(
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                detail.generatedSummary?.let { summary ->
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             IconButton(
                 onClick = { onAction(VoiceMemoUiAction.BeginTitleEdit) },
@@ -798,7 +867,22 @@ private fun TranscriptTextPanel(
                 )
             }
         } else {
+            val listState = rememberLazyListState()
+            val activeIndex = segments.indexOfFirst { segment ->
+                playbackPositionMillis >= segment.startMillis &&
+                    playbackPositionMillis < segment.endMillis
+            }
+
+            LaunchedEffect(activeIndex) {
+                if (activeIndex >= 0) {
+                    listState.animateScrollToItem(
+                        index = (activeIndex - 1).coerceAtLeast(0),
+                    )
+                }
+            }
+
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,

@@ -1,5 +1,6 @@
 import java.security.MessageDigest
 import java.nio.file.Files
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -33,12 +34,33 @@ val includeRewrittenDecoderPrefixDiagnostic = providers
         value.toBooleanStrictOrNull()
             ?: error("includeRewrittenDecoderPrefixDiagnostic must be true or false.")
     }
+val includeInt8FcRegressionDiagnostic = providers
+    .gradleProperty("includeInt8FcRegressionDiagnostic")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeInt8FcRegressionDiagnostic must be true or false.")
+    }
+val includeInt8FcArithmeticDiagnostic = providers
+    .gradleProperty("includeInt8FcArithmeticDiagnostic")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeInt8FcArithmeticDiagnostic must be true or false.")
+    }
 val includeFullFloatDecoderDiagnostic = providers
     .gradleProperty("includeFullFloatDecoderDiagnostic")
     .orElse("false")
     .map { value ->
         value.toBooleanStrictOrNull()
             ?: error("includeFullFloatDecoderDiagnostic must be true or false.")
+    }
+val includeWhisperCppBenchmark = providers
+    .gradleProperty("includeWhisperCppBenchmark")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeWhisperCppBenchmark must be true or false.")
     }
 val useFullFloatDecoderProduction = providers
     .gradleProperty("useFullFloatDecoderProduction")
@@ -168,8 +190,22 @@ val rewrittenDecoderKProjectionProbeFile = rootProject.layout.projectDirectory.f
 )
 val rewrittenDecoderKProjectionProbeSha256 =
     "7a30331ccb89e332edb176587d149f8d852e5b224864247defadae37db940b1d"
+val int8FcRegressionFixtureFile = rootProject.layout.projectDirectory.file(
+    "build/generated/whisper-int8-fc/" +
+        "whisper-first-block-k-projection-step-7-input.f32",
+)
+val int8FcRegressionFixtureSha256 =
+    "105b86c9c20463e3920d871f0f2a653a9da88ce8739572f489e077754f6c29cb"
 val rewrittenDecoderPrefixAssetRoot =
     layout.buildDirectory.dir("generated/rewrittenDecoderPrefixAndroidTestAssets")
+val int8FcRegressionAssetRoot =
+    layout.buildDirectory.dir("generated/int8FcRegressionAndroidTestAssets")
+val int8FcArithmeticDirectory =
+    rootProject.layout.projectDirectory.dir("build/generated/whisper-int8-fc-matrix")
+val int8FcArithmeticManifestSha256 =
+    "89d2b1777e4abd25dc22ca405be0014423f94cdf4460b1dd018747ab2b92f94a"
+val int8FcArithmeticAssetRoot =
+    layout.buildDirectory.dir("generated/int8FcArithmeticAndroidTestAssets")
 val fullFloatDecoderDiagnosticFile = rootProject.layout.projectDirectory.file(
     "build/generated/whisper-full-float-decoder/" +
         "whisper_large_v3_turbo_full_float_decoder.tflite",
@@ -185,6 +221,15 @@ val parakeetProductionAssetRoot =
     layout.buildDirectory.dir("generated/parakeetProductionAssets")
 val parakeetSourceAssetRoot =
     layout.projectDirectory.dir("src/main/generatedAssets/parakeet")
+val graniteMetadataAssetRoot =
+    layout.projectDirectory.dir("src/main/generatedAssets/granite")
+val graniteMetadataProductionAssetRoot =
+    layout.buildDirectory.dir("generated/graniteMetadataProductionAssets")
+val whisperCppRevision = "f049fff95a089aa9969deb009cdd4892b3e74916"
+val whisperCppSourceRoot =
+    rootProject.layout.projectDirectory.dir("build/third_party/whisper.cpp-v1.9.1")
+val whisperCppVulkanHeadersRoot =
+    rootProject.layout.projectDirectory.dir("build/third_party/Vulkan-Headers-1.4.350.1")
 val fullFloatDecoderProductionAssetPath =
     "whisper/whisper_large_v3_turbo_full_float_decoder.tflite"
 val sileroVadAssetRoot =
@@ -297,6 +342,23 @@ android {
                 "\"8e69e43d7773b856a93cc192f6308adc1d1e6c921d48c91c684bc78bf6e91418\""
             },
         )
+        buildConfigField(
+            "boolean",
+            "WHISPER_CPP_BENCHMARK_INCLUDED",
+            includeWhisperCppBenchmark.get().toString(),
+        )
+        if (includeWhisperCppBenchmark.get()) {
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DWHISPER_CPP_SOURCE_DIR=${whisperCppSourceRoot.asFile.absolutePath}",
+                        "-DWHISPER_CPP_REVISION=$whisperCppRevision",
+                        "-DVULKAN_HEADERS_DIR=${whisperCppVulkanHeadersRoot.asFile.absolutePath}",
+                    )
+                    cppFlags += listOf("-std=c++17", "-O3")
+                }
+            }
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -332,6 +394,10 @@ android {
         if (useFullFloatDecoderProduction.get()) {
             getByName("main").assets.srcDir(fullFloatDecoderProductionAssetRoot)
             getByName("main").assets.srcDir(parakeetProductionAssetRoot)
+            // Full-float production replaces the general generated-assets root
+            // with model-specific roots. Keep Granite explicit so title and
+            // summary generation remains available in this build mode.
+            getByName("main").assets.srcDir(graniteMetadataProductionAssetRoot)
         } else {
             getByName("main").assets.srcDir("src/main/generatedAssets")
         }
@@ -345,6 +411,16 @@ android {
             // included in the production APK.
             getByName("androidTest").assets.srcDir(rewrittenDecoderPrefixAssetRoot)
         }
+        if (includeInt8FcRegressionDiagnostic.get()) {
+            // The exact 1.65 MB INT8 K projection is independently packageable
+            // so its GPU regression does not require the 1.1 GB prefix model.
+            getByName("androidTest").assets.srcDir(int8FcRegressionAssetRoot)
+        }
+        if (includeInt8FcArithmeticDiagnostic.get()) {
+            // Synthetic and requantized K-projection variants isolate scale,
+            // zero-point, and accumulation behavior in LiteRT's GPU INT8 FC path.
+            getByName("androidTest").assets.srcDir(int8FcArithmeticAssetRoot)
+        }
         if (includeFullFloatDecoderDiagnostic.get()) {
             // Complete-decoder FLOAT32 weights and mask-rank barriers remain
             // isolated to the opt-in instrumentation APK.
@@ -357,6 +433,7 @@ android {
         // this entry would require another ~1.09 GB copy and prevent mmap.
         noCompress += "tflite"
         noCompress += "onnx"
+        noCompress += "litertlm"
     }
 
     packaging {
@@ -378,6 +455,15 @@ android {
     lint {
         abortOnError = true
         checkReleaseBuilds = true
+    }
+
+    if (includeWhisperCppBenchmark.get()) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/whispercpp-benchmark/CMakeLists.txt")
+                version = "3.22.1"
+            }
+        }
     }
 }
 
@@ -460,6 +546,131 @@ val verifyWhisperAssets by tasks.registering {
 
 tasks.named("preBuild").configure {
     dependsOn(verifyWhisperAssets)
+}
+
+val verifyWhisperCppBenchmarkSource by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned, opt-in whisper.cpp benchmark source checkout."
+    onlyIf { includeWhisperCppBenchmark.get() }
+    inputs.file(whisperCppSourceRoot.file(".voicememo-whispercpp-revision"))
+    inputs.file(whisperCppSourceRoot.file("CMakeLists.txt"))
+    inputs.file(whisperCppSourceRoot.file("include/whisper.h"))
+    inputs.file(whisperCppVulkanHeadersRoot.file("include/vulkan/vulkan.hpp"))
+
+    doLast {
+        val sourceDirectory = whisperCppSourceRoot.asFile
+        val revisionFile = File(sourceDirectory, ".voicememo-whispercpp-revision")
+        check(File(sourceDirectory, "CMakeLists.txt").isFile) {
+            """
+            Pinned whisper.cpp benchmark sources are missing:
+             - ${sourceDirectory.relativeTo(rootProject.projectDir)}
+
+            Run scripts/fetch-whisper-cpp-benchmark.sh source, then rebuild with
+            -PincludeWhisperCppBenchmark=true.
+            """.trimIndent()
+        }
+        check(revisionFile.isFile && revisionFile.readText().trim() == whisperCppRevision) {
+            "whisper.cpp source revision is missing or not pinned to $whisperCppRevision."
+        }
+        check(
+            whisperCppVulkanHeadersRoot.file("include/vulkan/vulkan.hpp").asFile.isFile,
+        ) {
+            "Pinned Vulkan C++ headers are missing; run scripts/fetch-whisper-cpp-benchmark.sh source."
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    if (includeWhisperCppBenchmark.get()) {
+        dependsOn(verifyWhisperCppBenchmarkSource)
+    }
+}
+
+val graniteMetadataModel =
+    graniteMetadataAssetRoot.file("granite-4.0-350m_q8_ekv1280.litertlm")
+val verifyGraniteMetadataModel by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned offline Granite title and summary model."
+    inputs.file(graniteMetadataModel)
+
+    doLast {
+        val assetFile = graniteMetadataModel.asFile
+        check(assetFile.isFile) {
+            """
+            Offline Granite metadata model is missing:
+             - ${assetFile.relativeTo(projectDir)}
+
+            Run scripts/fetch-granite-metadata-model.sh, then build again.
+            """.trimIndent()
+        }
+        check(assetFile.length() == 468_209_584L) {
+            "${assetFile.name} has ${assetFile.length()} bytes; expected 468209584."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        assetFile.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        check(
+            actualSha256 ==
+                "c8e9a29493f62b7c44461fb36980987c4c1454c75e95f57ba0539a8edc9dce76",
+        ) {
+            "${assetFile.name} SHA-256 is $actualSha256; expected the pinned model."
+        }
+    }
+}
+
+val prepareGraniteMetadataProductionAssets by tasks.registering(Sync::class) {
+    from(graniteMetadataAssetRoot) {
+        into("granite")
+    }
+    into(graniteMetadataProductionAssetRoot)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifyGraniteMetadataModel)
+    dependsOn(prepareGraniteMetadataProductionAssets)
+}
+
+val verifyGraniteInDebugApk by tasks.registering {
+    group = "verification"
+    description = "Checks that the pinned Granite model is stored in the debug APK."
+    dependsOn("packageDebug")
+
+    val debugApk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+    inputs.file(debugApk)
+
+    doLast {
+        val apkFile = debugApk.get().asFile
+        check(apkFile.isFile) {
+            "Debug APK was not produced at ${apkFile.relativeTo(projectDir)}."
+        }
+        ZipFile(apkFile).use { apk ->
+            val entryPath =
+                "assets/granite/granite-4.0-350m_q8_ekv1280.litertlm"
+            val entry = apk.getEntry(entryPath)
+            checkNotNull(entry) {
+                "The debug APK is missing the bundled Granite metadata model: $entryPath"
+            }
+            check(entry.size == 468_209_584L) {
+                "The debug APK Granite model has ${entry.size} bytes; expected 468209584."
+            }
+            check(entry.method == ZipEntry.STORED) {
+                "The debug APK Granite model must be stored uncompressed for AssetManager.openFd."
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        dependsOn(verifyGraniteInDebugApk)
+    }
 }
 
 val requiredParakeetAssets = mapOf(
@@ -1128,6 +1339,177 @@ tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
     }
 }
 
+val prepareInt8FcRegressionDiagnostic by tasks.registering {
+    group = "verification"
+    description = "Packages only the pinned Whisper INT8 K-projection regression model."
+    onlyIf { includeInt8FcRegressionDiagnostic.get() }
+    inputs.file(rewrittenDecoderKProjectionProbeFile)
+    inputs.file(int8FcRegressionFixtureFile)
+    inputs.property("expectedSha256", rewrittenDecoderKProjectionProbeSha256)
+    inputs.property("expectedFixtureSha256", int8FcRegressionFixtureSha256)
+    outputs.dir(int8FcRegressionAssetRoot)
+
+    doLast {
+        val source = rewrittenDecoderKProjectionProbeFile.asFile
+        check(source.isFile && source.length() == 1_654_640L) {
+            "Generate the pinned isolated K-projection probe before packaging diagnostics."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        source.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val actualSha256 =
+            digest.digest().joinToString("") { "%02x".format(it) }
+        check(actualSha256 == rewrittenDecoderKProjectionProbeSha256) {
+            "k-projection-probe.tflite SHA-256 is $actualSha256; " +
+                "expected $rewrittenDecoderKProjectionProbeSha256."
+        }
+        val fixture = int8FcRegressionFixtureFile.asFile
+        check(fixture.isFile && fixture.length() == 655_360L) {
+            "Generate the pinned Whisper INT8 FC step-7 fixture before packaging diagnostics."
+        }
+        val fixtureDigest = MessageDigest.getInstance("SHA-256")
+        fixture.inputStream().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                fixtureDigest.update(buffer, 0, count)
+            }
+        }
+        val actualFixtureSha256 =
+            fixtureDigest.digest().joinToString("") { "%02x".format(it) }
+        check(actualFixtureSha256 == int8FcRegressionFixtureSha256) {
+            "INT8 FC fixture SHA-256 is $actualFixtureSha256; " +
+                "expected $int8FcRegressionFixtureSha256."
+        }
+
+        val assetRoot = int8FcRegressionAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare the INT8 FC regression asset outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper-decoder-prefix")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        val destination = outputDirectory.resolve("k-projection-probe.tflite").toPath()
+        try {
+            Files.createLink(destination, source.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(source.toPath(), destination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(source.toPath(), destination)
+        }
+        val fixtureDestination =
+            outputDirectory.resolve("k-projection-step-7-input.f32").toPath()
+        try {
+            Files.createLink(fixtureDestination, fixture.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(fixture.toPath(), fixtureDestination)
+        } catch (_: java.nio.file.FileSystemException) {
+            Files.copy(fixture.toPath(), fixtureDestination)
+        }
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    if (includeInt8FcRegressionDiagnostic.get()) {
+        dependsOn(prepareInt8FcRegressionDiagnostic)
+    }
+}
+
+val prepareInt8FcArithmeticDiagnostic by tasks.registering {
+    group = "verification"
+    description = "Verifies and packages the isolated INT8 FC arithmetic matrix."
+    onlyIf { includeInt8FcArithmeticDiagnostic.get() }
+    inputs.dir(int8FcArithmeticDirectory)
+    inputs.file(int8FcRegressionFixtureFile)
+    inputs.property("expectedManifestSha256", int8FcArithmeticManifestSha256)
+    inputs.property("expectedFixtureSha256", int8FcRegressionFixtureSha256)
+    outputs.dir(int8FcArithmeticAssetRoot)
+
+    doLast {
+        val sourceDirectory = int8FcArithmeticDirectory.asFile
+        val manifest = sourceDirectory.resolve("matrix-manifest.tsv")
+        check(manifest.isFile) {
+            "Generate the pinned INT8 FC arithmetic matrix before packaging diagnostics."
+        }
+        fun sha256(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+        val actualManifestSha256 = sha256(manifest)
+        check(actualManifestSha256 == int8FcArithmeticManifestSha256) {
+            "INT8 FC arithmetic manifest SHA-256 is $actualManifestSha256; " +
+                "expected $int8FcArithmeticManifestSha256."
+        }
+        val expectedNames = listOf(
+            "original-per-channel",
+            "original-explicit-zero-points",
+            "requantized-per-tensor",
+            "requantized-uniform-per-channel",
+            "synthetic-diagonal-scale-ramp",
+            "synthetic-accumulation-ladder",
+            "float32-original-control",
+        )
+        expectedNames.forEach { name ->
+            val model = sourceDirectory.resolve("$name.tflite")
+            check(model.isFile && model.length() in 1_000_000L..7_000_000L) {
+                "INT8 FC arithmetic model is missing or invalid: ${model.name}"
+            }
+            if (name != "float32-original-control") {
+                check(sourceDirectory.resolve("$name.scales.f32").isFile) {
+                    "INT8 FC scale sidecar is missing for $name."
+                }
+                check(sourceDirectory.resolve("$name.sums.i32").isFile) {
+                    "INT8 FC row-sum sidecar is missing for $name."
+                }
+            }
+        }
+        val fixture = int8FcRegressionFixtureFile.asFile
+        check(fixture.isFile && sha256(fixture) == int8FcRegressionFixtureSha256) {
+            "Generate the pinned Whisper INT8 FC step-7 fixture before packaging diagnostics."
+        }
+
+        val assetRoot = int8FcArithmeticAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare INT8 FC arithmetic assets outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val destination = assetRoot.resolve("whisper-int8-fc-matrix")
+        check(destination.mkdirs()) {
+            "Could not create ${destination.relativeTo(rootProject.projectDir)}."
+        }
+        sourceDirectory.listFiles().orEmpty().filter(File::isFile).forEach { source ->
+            Files.copy(source.toPath(), destination.resolve(source.name).toPath())
+        }
+        Files.copy(
+            fixture.toPath(),
+            destination.resolve("real-step-7-input.f32").toPath(),
+        )
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    if (includeInt8FcArithmeticDiagnostic.get()) {
+        dependsOn(prepareInt8FcArithmeticDiagnostic)
+    }
+}
+
 val verifyFullFloatDecoderDiagnostic by tasks.registering {
     group = "verification"
     description = "Verifies the fail-closed complete FLOAT32 decoder GPU model."
@@ -1294,6 +1676,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
     if (useStrictMathGpuProbe.get() || useFp16Fp32AccumGpuProbe.get()) {
         // Diagnostic-only: a generated local copy changes one OpenCL compiler
         // option or precision-selection instruction in the arm64 accelerator.

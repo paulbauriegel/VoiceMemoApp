@@ -26,6 +26,7 @@ class VoiceMemoApplication : Application(), RecordingCompletionSink {
                 audioPath = recording.audioPath,
                 waveformPath = recording.waveformPath,
                 waveformState = WaveformState.READY,
+                titleEditedByUser = false,
             ),
         )
     }

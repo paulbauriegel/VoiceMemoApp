@@ -23,6 +23,7 @@ import com.example.voicememo.data.TranscriptionJob
 import com.example.voicememo.data.TranscriptionJobStatus
 import com.example.voicememo.data.TranscriptionPhase
 import com.example.voicememo.transcription.AudioChunkWindow
+import com.example.voicememo.transcription.GraniteRecordingMetadataGenerator
 import com.example.voicememo.transcription.LiteRtWhisperBackendFactory
 import com.example.voicememo.transcription.LiteRtWhisperEngine
 import com.example.voicememo.transcription.LiteRtParakeetEngine
@@ -449,18 +450,47 @@ class TranscriptionWorker(
             job = repository.getTranscriptionJob(job.id) ?: return Result.failure()
             updateJob(
                 job.copy(
-                    phase = TranscriptionPhase.MERGING,
+                    phase = TranscriptionPhase.GENERATING_METADATA,
                     currentChunkIndex = null,
                     currentToken = 0,
                     updatedAtMillis = System.currentTimeMillis(),
                 ),
             )
-            setForeground(foregroundInfo("Finalizing transcript", progress = 1f))
+            setForeground(foregroundInfo("Creating title and summary", progress = 1f))
+            var metadata: com.example.voicememo.transcription.RecordingMetadata? = null
+            var metadataFailure: Throwable? = null
+            if (transcript.text.isNotBlank()) {
+                if (!InferenceGate.awaitRecordingIdle { isStopped }) {
+                    throw WhisperCancelledException()
+                }
+                try {
+                    withContext(Dispatchers.IO) {
+                        metadata = GraniteRecordingMetadataGenerator
+                            .create(applicationContext)
+                            .generate(transcript.text)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    metadataFailure = failure
+                }
+            }
+            val transcriptWarnings = transcript.warnings.toMutableList()
+            metadataFailure?.let { failure ->
+                Log.w(TAG, "Local title and summary generation failed.", failure)
+                transcriptWarnings +=
+                    "The transcript finished, but its title and summary could not be generated."
+            }
             repository.completeTranscriptionJob(
                 jobId = job.id,
                 mergedText = transcript.text,
                 detectedLanguage = transcript.detectedLanguage.takeUnless { it == "und" },
-                warning = transcript.warnings.takeIf(List<String>::isNotEmpty)?.joinToString("\n"),
+                warning = transcriptWarnings.takeIf(List<String>::isNotEmpty)?.joinToString("\n"),
+                generatedTitle = metadata?.title,
+                generatedSummary = metadata?.summary,
+                metadataModelId = metadata?.let {
+                    GraniteRecordingMetadataGenerator.MODEL_ID
+                },
             )
             benchmark?.finish(outcome = "SUCCESS")
             return Result.success()

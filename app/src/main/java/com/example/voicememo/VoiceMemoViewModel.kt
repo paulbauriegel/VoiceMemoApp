@@ -22,6 +22,7 @@ import com.example.voicememo.recording.WaveformBucket
 import com.example.voicememo.recording.WaveformSidecar
 import com.example.voicememo.sharing.ShareContent
 import com.example.voicememo.sharing.ShareableMemo
+import com.example.voicememo.settings.AppearanceMode
 import com.example.voicememo.ui.DetailSection
 import com.example.voicememo.ui.LicenseUi
 import com.example.voicememo.ui.LibraryTab
@@ -43,6 +44,7 @@ import com.example.voicememo.ui.VoiceMemoDetailUi
 import com.example.voicememo.ui.VoiceMemoListItemUi
 import com.example.voicememo.ui.VoiceMemoUiAction
 import com.example.voicememo.transcription.SileroVoiceActivityDetector
+import com.example.voicememo.transcription.GraniteRecordingMetadataGenerator
 import com.example.voicememo.transcription.WhisperAssets
 import com.example.voicememo.transcription.ParakeetAssets
 import com.example.voicememo.transcription.WhisperTimestampTokens
@@ -89,6 +91,7 @@ class VoiceMemoViewModel(
     private val repository = container.memoRepository
     private val presentation = MutableStateFlow(
         PresentationState(
+            appearanceMode = container.appearancePreferences.mode,
             transcriptionTimestampsEnabled =
                 container.transcriptionPreferences.timestampsEnabled,
             voiceActivityDetectionEnabled =
@@ -140,6 +143,25 @@ class VoiceMemoViewModel(
                     .bufferedReader()
                     .use { it.readText() },
                 sourceUrl = "https://ai.google.dev/edge/litert",
+            ),
+            LicenseUi(
+                name = "IBM Granite 4.0 350M",
+                version = "6f1e9bce",
+                licenseName = "Apache License 2.0",
+                notice = resources.openRawResource(R.raw.litert_apache_2_0)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl =
+                    "https://huggingface.co/litert-community/granite-4.0-350m-litert-lm",
+            ),
+            LicenseUi(
+                name = "Google LiteRT-LM",
+                version = "0.14.0",
+                licenseName = "Apache License 2.0",
+                notice = resources.openRawResource(R.raw.litert_apache_2_0)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://github.com/google-ai-edge/LiteRT-LM",
             ),
             LicenseUi(
                 name = "Silero VAD",
@@ -260,6 +282,7 @@ class VoiceMemoViewModel(
             isExportingBackup = local.isExportingBackup || local.isBackupExportPickerOpen,
             isRestoringBackup = local.isRestoringBackup || local.isBackupRestorePickerOpen,
             showRestoreBackupConfirmation = local.showRestoreBackupConfirmation,
+            appearanceMode = local.appearanceMode,
             transcriptionTimestampsEnabled = local.transcriptionTimestampsEnabled,
             voiceActivityDetectionEnabled = local.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled = local.gpuAccelerationEnabled,
@@ -280,6 +303,7 @@ class VoiceMemoViewModel(
         initialValue = VoiceMemoAppUiState(
             modelAvailability = modelAvailability(),
             licenses = licenseItems,
+            appearanceMode = container.appearancePreferences.mode,
             transcriptionTimestampsEnabled =
                 container.transcriptionPreferences.timestampsEnabled,
             voiceActivityDetectionEnabled =
@@ -563,6 +587,11 @@ class VoiceMemoViewModel(
 
             VoiceMemoUiAction.RetryModelAvailabilityCheck ->
                 presentation.update { it.copy(modelCheckNonce = it.modelCheckNonce + 1) }
+
+            is VoiceMemoUiAction.AppearanceModeChanged -> {
+                container.appearancePreferences.mode = action.mode
+                presentation.update { it.copy(appearanceMode = action.mode) }
+            }
 
             is VoiceMemoUiAction.TranscriptionTimestampsChanged -> {
                 container.transcriptionPreferences.timestampsEnabled = action.enabled
@@ -1079,6 +1108,7 @@ class VoiceMemoViewModel(
             },
             isPlaying = isCurrent && playback.isPlaying,
             transcriptPreview = displayTranscript.takeIf(String::isNotBlank),
+            generatedSummary = generatedSummary,
             transcription = transcriptionSummary(latestJob, displayTranscript),
             createdAtMillis = createdAtMillis,
             isStarred = isStarred,
@@ -1242,6 +1272,8 @@ class VoiceMemoViewModel(
                     )
                 }
                 .orEmpty(),
+            generatedSummary = memo.generatedSummary,
+            isGeneratingMetadata = latestJob.isGeneratingRecordingMetadata(),
             selectedSection = local.detailSection,
             transcript = transcriptState.copy(
                 draft = local.transcriptDraft ?: transcriptState.text,
@@ -1294,6 +1326,7 @@ class VoiceMemoViewModel(
             -> when (job.phase) {
                 com.example.voicememo.data.TranscriptionPhase.MERGING,
                 com.example.voicememo.data.TranscriptionPhase.SAVING,
+                com.example.voicememo.data.TranscriptionPhase.GENERATING_METADATA,
                 -> TranscriptionPhase.Finalizing
                 com.example.voicememo.data.TranscriptionPhase.ENCODING,
                 com.example.voicememo.data.TranscriptionPhase.DECODING,
@@ -1397,12 +1430,18 @@ class VoiceMemoViewModel(
             app.assets.openFd(ParakeetAssets.MODEL).use { descriptor ->
                 check(descriptor.declaredLength == ParakeetAssets.MODEL_SIZE_BYTES)
             }
+            app.assets.openFd(GraniteRecordingMetadataGenerator.MODEL_ASSET).use { descriptor ->
+                check(
+                    descriptor.declaredLength ==
+                        GraniteRecordingMetadataGenerator.MODEL_SIZE_BYTES,
+                )
+            }
             ModelAvailabilityUiState(
                 phase = ModelAvailabilityPhase.Available,
                 headline = "Local transcription ready",
                 supportingText =
-                    "Whisper Large v3 Turbo and Parakeet TDT 0.6B v3 are bundled and " +
-                        "run entirely on this device.",
+                    "Whisper, Parakeet, and Granite are bundled and run entirely " +
+                        "on this device.",
             )
         }.getOrElse { error ->
             ModelAvailabilityUiState(
@@ -1462,6 +1501,7 @@ class VoiceMemoViewModel(
         val pendingShare: PendingShareUi? = null,
         val pendingProjectDeleteId: String? = null,
         val modelCheckNonce: Int = 0,
+        val appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
         val transcriptionTimestampsEnabled: Boolean = false,
         val voiceActivityDetectionEnabled: Boolean = true,
         val gpuAccelerationEnabled: Boolean = true,
@@ -1571,6 +1611,10 @@ class VoiceMemoViewModel(
         }
     }
 }
+
+internal fun TranscriptionJob?.isGeneratingRecordingMetadata(): Boolean =
+    this?.status == TranscriptionJobStatus.RUNNING &&
+        phase == com.example.voicememo.data.TranscriptionPhase.GENERATING_METADATA
 
 internal fun backupFileName(nowMillis: Long): String =
     "Voice-Memo-backup-" +

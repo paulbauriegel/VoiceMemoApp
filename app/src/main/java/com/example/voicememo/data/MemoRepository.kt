@@ -134,6 +134,9 @@ interface MemoRepository {
         mergedText: String,
         detectedLanguage: String?,
         warning: String?,
+        generatedTitle: String? = null,
+        generatedSummary: String? = null,
+        metadataModelId: String? = null,
         completedAtMillis: Long = System.currentTimeMillis(),
     )
 
@@ -190,17 +193,20 @@ class RoomMemoRepository(
                     flowOf(null)
                 } else {
                     val latestJob = aggregate.transcriptionJobs.maxByOrNull { it.updatedAtMillis }
-                    if (latestJob == null) {
+                    val transcriptChunkJob = selectTranscriptChunkJob(
+                        aggregate.transcriptionJobs,
+                    )
+                    if (transcriptChunkJob == null) {
                         flowOf(
                             MemoDetail(
                                 memo = aggregate.memo,
                                 transcript = aggregate.transcripts.singleOrNull(),
-                                latestJob = null,
+                                latestJob = latestJob,
                                 chunks = emptyList(),
                             ),
                         )
                     } else {
-                        dao.observeTranscriptChunks(latestJob.id).map { chunks ->
+                        dao.observeTranscriptChunks(transcriptChunkJob.id).map { chunks ->
                             MemoDetail(
                                 memo = aggregate.memo,
                                 transcript = aggregate.transcripts.singleOrNull(),
@@ -228,6 +234,7 @@ class RoomMemoRepository(
             waveformPath = newMemo.waveformPath,
             waveformState = newMemo.waveformState,
             languageOverride = null,
+            titleEditedByUser = newMemo.titleEditedByUser,
         )
         database.withTransaction {
             dao.insertMemo(memo)
@@ -313,6 +320,7 @@ class RoomMemoRepository(
         database.withTransaction {
             val memo = requireMemo(memoId).copy(
                 title = title.trim(),
+                titleEditedByUser = true,
                 updatedAtMillis = System.currentTimeMillis(),
             )
             dao.updateMemo(memo)
@@ -521,6 +529,9 @@ class RoomMemoRepository(
         mergedText: String,
         detectedLanguage: String?,
         warning: String?,
+        generatedTitle: String?,
+        generatedSummary: String?,
+        metadataModelId: String?,
         completedAtMillis: Long,
     ) {
         database.withTransaction {
@@ -550,7 +561,21 @@ class RoomMemoRepository(
                 errorMessage = null,
                 updatedAtMillis = completedAtMillis,
             )
-            val updatedMemo = memo.copy(updatedAtMillis = completedAtMillis)
+            val normalizedGeneratedTitle = generatedTitle
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+            val normalizedGeneratedSummary = generatedSummary
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+            require(normalizedGeneratedSummary == null || !metadataModelId.isNullOrBlank()) {
+                "Generated summaries must identify their local model."
+            }
+            val updatedMemo = memo.withGeneratedMetadata(
+                generatedTitle = normalizedGeneratedTitle,
+                generatedSummary = normalizedGeneratedSummary,
+                metadataModelId = metadataModelId,
+                generatedAtMillis = completedAtMillis,
+            )
             dao.upsertTranscript(transcript)
             dao.upsertTranscriptionJob(completedJob)
             dao.updateMemo(updatedMemo)
@@ -629,6 +654,49 @@ class RoomMemoRepository(
         }
     }
 }
+
+/**
+ * The persisted transcript is only replaced when a job succeeds, so its timed
+ * chunks must come from the newest successful job as well. A queued, running,
+ * failed, or cancelled retry remains the latest job for progress/status, but
+ * must not hide the timestamps belonging to the saved transcript.
+ */
+internal fun selectTranscriptChunkJob(
+    jobs: List<TranscriptionJob>,
+): TranscriptionJob? =
+    jobs
+        .asSequence()
+        .filter { it.status == TranscriptionJobStatus.SUCCEEDED }
+        .maxWithOrNull(
+            compareBy<TranscriptionJob> { it.updatedAtMillis }
+                .thenBy { it.createdAtMillis }
+                .thenBy { it.id },
+        )
+
+internal fun MemoRecord.withGeneratedMetadata(
+    generatedTitle: String?,
+    generatedSummary: String?,
+    metadataModelId: String?,
+    generatedAtMillis: Long,
+): MemoRecord = copy(
+    title = if (!titleEditedByUser && !generatedTitle.isNullOrBlank()) {
+        generatedTitle
+    } else {
+        title
+    },
+    generatedSummary = generatedSummary ?: this.generatedSummary,
+    metadataGeneratedAtMillis = if (generatedSummary != null) {
+        generatedAtMillis
+    } else {
+        metadataGeneratedAtMillis
+    },
+    metadataModelId = if (generatedSummary != null) {
+        metadataModelId
+    } else {
+        this.metadataModelId
+    },
+    updatedAtMillis = generatedAtMillis,
+)
 
 data class MemoLibrarySearchResult(
     val query: String,

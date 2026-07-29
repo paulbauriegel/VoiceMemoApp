@@ -305,6 +305,10 @@ internal class DefaultVoiceMemoBackupManager(
                         languageOverride = source.languageOverride,
                         pendingDeletion = false,
                         isStarred = source.isStarred,
+                        titleEditedByUser = source.titleEditedByUser,
+                        generatedSummary = source.generatedSummary,
+                        metadataGeneratedAtMillis = source.metadataGeneratedAtMillis,
+                        metadataModelId = source.metadataModelId,
                     )
                     val transcript = source.transcript?.copy(memoId = destinationId)
                     restored += RestoredMemo(
@@ -407,6 +411,10 @@ internal class DefaultVoiceMemoBackupManager(
             setProperty("durationMillis", memo.durationMillis.toString())
             setProperty("waveformState", memo.waveformState.name)
             setProperty("isStarred", memo.isStarred.toString())
+            setProperty("titleEditedByUser", memo.titleEditedByUser.toString())
+            putOptionalString("generatedSummary", memo.generatedSummary)
+            putOptionalLong("metadataGeneratedAtMillis", memo.metadataGeneratedAtMillis)
+            putOptionalString("metadataModelId", memo.metadataModelId)
             putOptionalString("languageOverride", memo.languageOverride)
             putOptionalString("projectId", snapshot.project?.id)
             putOptionalString("projectName", snapshot.project?.name)
@@ -569,6 +577,29 @@ internal class DefaultVoiceMemoBackupManager(
         val languageOverride = metadata.optionalString("languageOverride")
             ?.also(::requireValidLanguage)
         val isStarred = metadata.optionalBooleanIfDeclared("isStarred") ?: false
+        val titleEditedByUser =
+            metadata.optionalBooleanIfDeclared("titleEditedByUser") ?: true
+        val generatedSummary = metadata.optionalStringIfDeclared("generatedSummary")
+            ?.also {
+                require(it.isNotBlank() && it.length <= MAX_GENERATED_SUMMARY_CHARACTERS) {
+                    "A backup has an invalid generated summary."
+                }
+            }
+        val metadataGeneratedAt =
+            metadata.optionalLongIfDeclared("metadataGeneratedAtMillis")
+        val metadataModelId = metadata.optionalStringIfDeclared("metadataModelId")
+        require(metadataGeneratedAt == null || metadataGeneratedAt >= 0L) {
+            "A backup has an invalid metadata timestamp."
+        }
+        require(metadataModelId == null || metadataModelId.length <= MAX_METADATA_MODEL_ID_CHARACTERS) {
+            "A backup has an invalid metadata model ID."
+        }
+        require(
+            (generatedSummary == null && metadataGeneratedAt == null && metadataModelId == null) ||
+                (generatedSummary != null && metadataGeneratedAt != null && metadataModelId != null),
+        ) {
+            "A backup has incomplete generated metadata."
+        }
         val projectId = metadata.optionalStringIfDeclared("projectId")
         val projectName = metadata.optionalStringIfDeclared("projectName")
         val projectCreatedAt = metadata.optionalLongIfDeclared("projectCreatedAtMillis")
@@ -709,6 +740,10 @@ internal class DefaultVoiceMemoBackupManager(
             waveformState = waveformState,
             languageOverride = languageOverride,
             isStarred = isStarred,
+            titleEditedByUser = titleEditedByUser,
+            generatedSummary = generatedSummary,
+            metadataGeneratedAtMillis = metadataGeneratedAt,
+            metadataModelId = metadataModelId,
             project = project,
             audio = audio,
             waveform = waveform,
@@ -838,6 +873,10 @@ internal class DefaultVoiceMemoBackupManager(
         val waveformState: WaveformState,
         val languageOverride: String?,
         val isStarred: Boolean,
+        val titleEditedByUser: Boolean,
+        val generatedSummary: String?,
+        val metadataGeneratedAtMillis: Long?,
+        val metadataModelId: String?,
         val project: ProjectRecord?,
         val audio: File,
         val waveform: File?,
@@ -1180,6 +1219,8 @@ private const val PENDING_RESTORE_MARKER = ".voice-memo-restore-pending"
 private const val MAX_MEMOS = 10_000
 private const val MAX_ENTRIES = 60_001
 private const val MAX_TITLE_CHARACTERS = 240
+private const val MAX_GENERATED_SUMMARY_CHARACTERS = 220
+private const val MAX_METADATA_MODEL_ID_CHARACTERS = 120
 private const val MAX_PROJECT_NAME_CHARACTERS = 80
 private const val MAX_LANGUAGE_CHARACTERS = 32
 private const val MAX_ID_ATTEMPTS = 100

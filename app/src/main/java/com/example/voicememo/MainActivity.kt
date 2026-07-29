@@ -11,8 +11,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -125,6 +128,15 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            val darkTheme = uiState.appearanceMode.resolveDarkTheme(
+                isSystemInDarkTheme(),
+            )
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
             val canNavigateBack = uiState.selectedMemoIds.isNotEmpty() ||
                 uiState.destination != VoiceMemoDestination.Library
             BackHandler(enabled = canNavigateBack) {
@@ -133,6 +145,7 @@ class MainActivity : ComponentActivity() {
             VoiceMemoApp(
                 uiState = uiState,
                 onAction = ::dispatch,
+                darkTheme = darkTheme,
             )
         }
     }

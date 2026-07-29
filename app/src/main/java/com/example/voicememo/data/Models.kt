@@ -32,6 +32,7 @@ enum class TranscriptionPhase {
     DECODING,
     MERGING,
     SAVING,
+    GENERATING_METADATA,
     PAUSED,
     COMPLETE,
     FAILED,
@@ -110,6 +111,15 @@ data class MemoRecord(
     val pendingDeletion: Boolean = false,
     /** User-controlled favorite state used by the Starred recordings filter. */
     val isStarred: Boolean = false,
+    /**
+     * Legacy and imported titles are treated as user-owned. New recordings
+     * start false so a generated title may replace their timestamp placeholder.
+     */
+    val titleEditedByUser: Boolean = true,
+    /** One-line description generated locally after transcription. */
+    val generatedSummary: String? = null,
+    val metadataGeneratedAtMillis: Long? = null,
+    val metadataModelId: String? = null,
 )
 
 @Entity(
@@ -267,6 +277,7 @@ data class NewMemo(
     val audioPath: String,
     val waveformPath: String?,
     val waveformState: WaveformState,
+    val titleEditedByUser: Boolean = true,
 )
 
 enum class TranscriptSource {
@@ -291,6 +302,7 @@ data class MemoSummary(
     val detectedLanguage: String?,
     val latestJob: TranscriptionJob?,
     val isStarred: Boolean = false,
+    val generatedSummary: String? = null,
 )
 
 data class ProjectSummary(
@@ -352,5 +364,6 @@ internal fun MemoAggregate.toSummary(): MemoSummary {
         detectedLanguage = transcript?.detectedLanguage,
         latestJob = latestJob,
         isStarred = memo.isStarred,
+        generatedSummary = memo.generatedSummary,
     )
 }
