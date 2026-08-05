@@ -1,0 +1,69 @@
+diff --git a/include/whisper.h b/include/whisper.h
+index e11de30..7362fd1 100644
+--- a/include/whisper.h
++++ b/include/whisper.h
+@@ -320,6 +320,17 @@ extern "C" {
+                                int   offset,
+                                int   n_threads);
+ 
++    // Benchmark diagnostics: copy the final encoder tensor as logical
++    // [audio_ctx][audio_state] FP32 values. Returns a negative value when no
++    // encoder result is available or the destination size is incorrect.
++    WHISPER_API int whisper_encoder_state_n_elements(struct whisper_context * ctx);
++    WHISPER_API int whisper_encoder_state_n_ctx(struct whisper_context * ctx);
++    WHISPER_API int whisper_encoder_state_n_state(struct whisper_context * ctx);
++    WHISPER_API int whisper_copy_encoder_state(
++            struct whisper_context * ctx,
++                           float * output,
++                             int   n_elements);
++
+     // Run the Whisper decoder to obtain the logits and probabilities for the next token.
+     // Make sure to call whisper_encode() first.
+     // tokens + n_tokens is the provided context for the decoder.
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index fdaf3e3..fd3f542 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -3946,6 +3946,42 @@ int whisper_encode(struct whisper_context * ctx, int offset, int n_threads) {
+     return 0;
+ }
+ 
++int whisper_encoder_state_n_elements(struct whisper_context * ctx) {
++    if (ctx == nullptr || ctx->state == nullptr || ctx->state->embd_enc == nullptr) {
++        return -1;
++    }
++    return static_cast<int>(ggml_nelements(ctx->state->embd_enc));
++}
++
++int whisper_encoder_state_n_ctx(struct whisper_context * ctx) {
++    if (ctx == nullptr || ctx->state == nullptr || ctx->state->embd_enc == nullptr) {
++        return -1;
++    }
++    return static_cast<int>(ctx->state->embd_enc->ne[1]);
++}
++
++int whisper_encoder_state_n_state(struct whisper_context * ctx) {
++    if (ctx == nullptr || ctx->state == nullptr || ctx->state->embd_enc == nullptr) {
++        return -1;
++    }
++    return static_cast<int>(ctx->state->embd_enc->ne[0]);
++}
++
++int whisper_copy_encoder_state(
++        struct whisper_context * ctx,
++                       float * output,
++                         int   n_elements) {
++    if (ctx == nullptr || ctx->state == nullptr || ctx->state->embd_enc == nullptr || output == nullptr) {
++        return -1;
++    }
++    const ggml_tensor * tensor = ctx->state->embd_enc;
++    if (tensor->type != GGML_TYPE_F32 || n_elements != ggml_nelements(tensor)) {
++        return -2;
++    }
++    ggml_backend_tensor_get(tensor, output, 0, ggml_nbytes(tensor));
++    return 0;
++}
++
+ int whisper_decode_with_state(struct whisper_context * ctx, struct whisper_state * state, const whisper_token * tokens, int n_tokens, int n_past, int n_threads) {
+     whisper_batch_prep_legacy(state->batch, tokens, n_tokens, n_past, 0);
+ 

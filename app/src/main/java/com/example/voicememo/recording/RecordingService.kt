@@ -25,6 +25,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.voicememo.MainActivity
 import com.example.voicememo.R
+import com.example.voicememo.VoiceMemoApplication
 import com.example.voicememo.coordination.InferenceGate
 import java.io.File
 import java.util.UUID
@@ -52,6 +53,9 @@ class RecordingService : Service() {
     private var waveform: WaveformAccumulator? = null
     private var audioFile: File? = null
     private var waveformFile: File? = null
+    private var memoDirectory: File? = null
+    private var whisperWindowSpooler: WhisperWindowSpooler? = null
+    private var preTranscriptionConfig: RecordingTranscriptionConfig? = null
     private var activeMemoId: String? = null
     private var createdAtEpochMillis = 0L
     private var sampleRate = PREFERRED_SAMPLE_RATE
@@ -120,12 +124,13 @@ class RecordingService : Service() {
         activeMemoId = memoId
         createdAtEpochMillis = System.currentTimeMillis()
 
-        val memoDirectory = File(filesDir, "memos/$memoId").apply { mkdirs() }
-        audioFile = File(memoDirectory, "audio.wav")
-        waveformFile = File(memoDirectory, "waveform.vwf")
+        val directory = File(filesDir, "memos/$memoId").apply { mkdirs() }
+        memoDirectory = directory
+        audioFile = File(directory, "audio.wav")
+        waveformFile = File(directory, "waveform.vwf")
 
         startAsForeground(buildNotification(paused = false, elapsedMillis = 0L))
-        InferenceGate.recordingStarted()
+        InferenceGate.recordingStarted(memoId)
 
         captureJob = serviceScope.launch {
             try {
@@ -136,6 +141,26 @@ class RecordingService : Service() {
                 sampleRate = configured.second
                 writer = WavFileWriter(requireNotNull(audioFile), sampleRate)
                 waveform = WaveformAccumulator(sampleRate)
+                val container = (application as VoiceMemoApplication).container
+                if (container.transcriptionPreferences.transcribeWhileRecordingEnabled) {
+                    val config = RecordingTranscriptionConfig(
+                        timestampsEnabled =
+                            container.transcriptionPreferences.timestampsEnabled,
+                        voiceActivityDetectionEnabled =
+                            container.transcriptionPreferences.voiceActivityDetectionEnabled,
+                        gpuAccelerationEnabled =
+                            container.transcriptionPreferences.gpuAccelerationEnabled,
+                    )
+                    preTranscriptionConfig = config
+                    whisperWindowSpooler = runCatching {
+                        WhisperWindowSpooler(
+                            memoDirectory = requireNotNull(memoDirectory),
+                            sampleRate = sampleRate,
+                        )
+                    }.onFailure {
+                        Log.e(TAG, "Could not prepare Whisper recording windows.", it)
+                    }.getOrNull()
+                }
                 acquireWakeLock()
 
                 running.set(!stopRequested.get())
@@ -145,6 +170,24 @@ class RecordingService : Service() {
                 }
                 paused.set(false)
                 configured.first.startRecording()
+                if (whisperWindowSpooler != null) {
+                    preTranscriptionConfig?.let { config ->
+                        runCatching {
+                            container.transcriptionCoordinator.enqueueWhileRecording(
+                                memoId = memoId,
+                                memoDirectory = requireNotNull(memoDirectory).absolutePath,
+                                timestampsEnabled = config.timestampsEnabled,
+                                voiceActivityDetectionEnabled =
+                                    config.voiceActivityDetectionEnabled,
+                                gpuAccelerationEnabled = config.gpuAccelerationEnabled,
+                            )
+                        }.onFailure {
+                            Log.e(TAG, "Could not queue Whisper during recording.", it)
+                            runCatching { whisperWindowSpooler?.close() }
+                            whisperWindowSpooler = null
+                        }
+                    }
+                }
                 Log.i(
                     TAG,
                     "Recording from input type=${configured.first.routedDevice?.type} " +
@@ -181,6 +224,7 @@ class RecordingService : Service() {
             when {
                 read > 0 -> {
                     writer?.write(samples, read)
+                    whisperWindowSpooler?.add(samples, read)
                     val buckets = waveform?.add(samples, read).orEmpty()
                     val elapsed = writer?.durationMillis ?: 0L
                     RecordingRuntime.state.value = RecordingState.Recording(
@@ -285,10 +329,13 @@ class RecordingService : Service() {
             waveform?.finishTo(requireNotNull(waveformFile))
         }.exceptionOrNull()
         waveform = null
+        runCatching { whisperWindowSpooler?.close() }
+            .onFailure { Log.e(TAG, "Could not finalize Whisper recording windows.", it) }
+        whisperWindowSpooler = null
 
         abandonAudioFocus()
         releaseWakeLock()
-        InferenceGate.recordingStopped()
+        InferenceGate.recordingStopped(memoId)
         removeForegroundNotification()
 
         val wav = audioFile
@@ -307,6 +354,7 @@ class RecordingService : Service() {
                 durationMillis = durationMillis,
                 sampleRate = sampleRate,
                 createdAtEpochMillis = createdAtEpochMillis,
+                preTranscriptionConfig = preTranscriptionConfig,
             )
         } else {
             val finalError = finalizationError?.message
@@ -320,6 +368,8 @@ class RecordingService : Service() {
         }
         audioFile = null
         waveformFile = null
+        memoDirectory = null
+        preTranscriptionConfig = null
 
         if (terminalState is RecordingState.Completed && application is RecordingCompletionSink) {
             serviceScope.launch {

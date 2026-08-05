@@ -135,6 +135,9 @@ internal object WhisperInferenceFingerprint {
                 "gpu-parity-guard_cpu-xnnpack-${workerCount}x$threadsPerWorker"
             gpuDecoderMode == "cpu" ->
                 "gpu-encoder-qd8-fp32-opencl_cpu-decoder-xnnpack-$threadsPerWorker"
+            gpuDecoderMode == "gpu" && WhisperAssets.SPLIT_MODEL_PRODUCTION ->
+                "gpu-split-encoder-fp32-opencl_decoder-fp16-opencl_" +
+                    "no-source-quant_cpu-gather"
             gpuDecoderMode == "gpu" ->
                 "gpu-full-float-decoder-fp32-opencl_no-source-quant_cpu-gather"
             else -> throw IllegalArgumentException(
@@ -273,23 +276,38 @@ internal object LiteRtWhisperBackendFactory {
         )
 
         val cpuFactory: () -> WhisperEngine = {
-            LiteRtWhisperEngine.open(
-                context = applicationContext,
-                threadCount = cpuThreadCount,
-                timestampsEnabled = timestampsEnabled,
-            )
+            if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                LiteRtFullGpuWhisperEngine.openProductionSplit(
+                    context = applicationContext,
+                    cpuOnly = true,
+                    timestampsEnabled = timestampsEnabled,
+                )
+            } else {
+                LiteRtWhisperEngine.open(
+                    context = applicationContext,
+                    threadCount = cpuThreadCount,
+                    timestampsEnabled = timestampsEnabled,
+                )
+            }
         }
         val opened = WhisperBackendSelector.open(
             requested = WhisperBackendRequest.GPU,
             openCpu = cpuFactory,
             openGpu = {
                 if (useFullGpuDecoder) {
-                    LiteRtFullGpuWhisperEngine.open(
-                        context = applicationContext,
-                        allowSourceQuantizedFcConvOps =
-                            allowSourceQuantizedFcConvOps,
-                        timestampsEnabled = timestampsEnabled,
-                    )
+                    if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                        LiteRtFullGpuWhisperEngine.openProductionSplit(
+                            context = applicationContext,
+                            timestampsEnabled = timestampsEnabled,
+                        )
+                    } else {
+                        LiteRtFullGpuWhisperEngine.open(
+                            context = applicationContext,
+                            allowSourceQuantizedFcConvOps =
+                                allowSourceQuantizedFcConvOps,
+                            timestampsEnabled = timestampsEnabled,
+                        )
+                    }
                 } else {
                     LiteRtGpuWhisperEngine.open(
                         context = applicationContext,

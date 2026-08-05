@@ -130,6 +130,7 @@ internal fun metadataPrompt(transcriptExcerpt: String): String =
 
     TRANSCRIPT:
     $transcriptExcerpt
+    $METADATA_ANSWER_MARKER
     """.trimIndent()
 
 internal fun buildMetadataTranscriptExcerpt(
@@ -156,20 +157,31 @@ internal fun buildMetadataTranscriptExcerpt(
 }
 
 internal fun parseRecordingMetadata(raw: String): RecordingMetadata? {
-    val cleaned = raw
+    val answer = raw.substringAfterLast(
+        delimiter = METADATA_ANSWER_MARKER,
+        missingDelimiterValue = raw,
+    )
+    val cleaned = answer
         .replace("```json", "", ignoreCase = true)
         .replace("```", "")
         .trim()
-    val title = METADATA_TITLE.find(cleaned)?.groupValues?.get(1)
-    val summary = METADATA_SUMMARY.find(cleaned)?.groupValues?.get(1)
+    val titleMatches = METADATA_TITLE.findAll(cleaned).toList()
+    val summaryMatches = METADATA_SUMMARY.findAll(cleaned).toList()
     val fallbackLines = cleaned.lineSequence()
         .map(String::trim)
         .map { it.trimStart('-', '*', '•').trim() }
         .filter(String::isNotBlank)
         .toList()
-    val normalizedTitle = cleanMetadataValue(title ?: fallbackLines.getOrNull(0))
+    val hasLabeledOutput = titleMatches.isNotEmpty() || summaryMatches.isNotEmpty()
+    val title = titleMatches.lastOrNull()?.groupValues?.get(1)
+        ?: fallbackLines.getOrNull(0).takeUnless { hasLabeledOutput }
+    val summary = summaryMatches.lastOrNull()?.groupValues?.get(1)
+        ?: fallbackLines.getOrNull(1).takeUnless { hasLabeledOutput }
+    val normalizedTitle = cleanMetadataValue(title)
+        ?.takeUnless(::isMetadataPromptInstruction)
         ?.boundedAtWord(80)
-    val normalizedSummary = cleanMetadataValue(summary ?: fallbackLines.getOrNull(1))
+    val normalizedSummary = cleanMetadataValue(summary)
+        ?.takeUnless(::isMetadataPromptInstruction)
         ?.boundedAtWord(220)
     if (normalizedTitle.isNullOrBlank() || normalizedSummary.isNullOrBlank()) return null
     return RecordingMetadata(
@@ -188,6 +200,16 @@ private fun cleanMetadataValue(value: String?): String? = value
     ?.trim()
     ?.takeIf(String::isNotBlank)
 
+private fun isMetadataPromptInstruction(value: String): Boolean {
+    val normalized = value.lowercase()
+    return normalized == "<title>" ||
+        normalized == "<summary>" ||
+        "3 to 8 words" in normalized ||
+        "no ending punctuation" in normalized ||
+        "exactly one short sentence" in normalized ||
+        "at most 24 words" in normalized
+}
+
 private fun String.boundedAtWord(maximumCharacters: Int): String {
     if (length <= maximumCharacters) return this
     return take(maximumCharacters + 1).trimAtWordEnd().take(maximumCharacters).trim()
@@ -205,3 +227,4 @@ private val METADATA_TITLE = Regex(
 private val METADATA_SUMMARY = Regex(
     pattern = """(?im)^\s*["']?summary["']?\s*[:=-]\s*(.+?)\s*,?\s*$""",
 )
+private const val METADATA_ANSWER_MARKER = "METADATA ANSWER:"

@@ -6,6 +6,8 @@ PROJECT_DIRECTORY="$(cd "${SCRIPT_DIRECTORY}/.." && pwd)"
 SOURCE_REVISION="f049fff95a089aa9969deb009cdd4892b3e74916"
 SOURCE_ARCHIVE_SHA256="279af4ce60dbf397362868f3bacc75b56a4332ac2541cae155070093f6aaf0e3"
 SOURCE_DIRECTORY="${PROJECT_DIRECTORY}/build/third_party/whisper.cpp-v1.9.1"
+SOURCE_PATCH="${PROJECT_DIRECTORY}/app/src/main/cpp/whispercpp-benchmark/voicememo-whispercpp-encoder-state.patch"
+SOURCE_BLOCK_PATCH="${PROJECT_DIRECTORY}/app/src/main/cpp/whispercpp-benchmark/voicememo-whispercpp-encoder-blocks.patch"
 VULKAN_HEADERS_VERSION="1.4.350.1"
 VULKAN_HEADERS_ARCHIVE_SHA256="6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83"
 VULKAN_HEADERS_DIRECTORY="${PROJECT_DIRECTORY}/build/third_party/Vulkan-Headers-${VULKAN_HEADERS_VERSION}"
@@ -21,7 +23,7 @@ FP16_MODEL_REVISION="6034871ec87c84e342efab769d4c5c06cd126db3"
 FP16_MODEL_NAME="ggml-large-v3-turbo.bin"
 FP16_MODEL_BYTES="1624555275"
 FP16_MODEL_SHA256="1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
-MODEL_DIRECTORY="${PROJECT_DIRECTORY}/build/model-assets/whisper.cpp"
+MODEL_DIRECTORY="${VOICEMEMO_WHISPER_BENCHMARK_MODEL_DIRECTORY:-${PROJECT_DIRECTORY}/build/model-assets/whisper.cpp}"
 MODEL_VARIANT="${2:-q5_0}"
 MODEL_REVISION=""
 MODEL_NAME=""
@@ -83,6 +85,10 @@ verify_source() {
     fail "source revision marker is missing."
   [[ "$(<"${SOURCE_DIRECTORY}/.voicememo-whispercpp-revision")" == "${SOURCE_REVISION}" ]] ||
     fail "source revision marker does not match ${SOURCE_REVISION}."
+  grep -q "whisper_copy_encoder_state" "${SOURCE_DIRECTORY}/include/whisper.h" ||
+    fail "benchmark encoder-state patch is missing; refetch the source directory."
+  grep -q "whisper_copy_encoder_block_diagnostic" "${SOURCE_DIRECTORY}/include/whisper.h" ||
+    fail "benchmark encoder-block patch is missing; refetch the source directory."
 }
 
 verify_model() {
@@ -123,6 +129,8 @@ fetch_source() (
   tar -xzf "${archive}" -C "${temporary_directory}"
   [[ -f "${extracted}/include/whisper.h" ]] ||
     fail "whisper.cpp archive layout changed unexpectedly."
+  git -C "${extracted}" apply "${SOURCE_PATCH}"
+  git -C "${extracted}" apply "${SOURCE_BLOCK_PATCH}"
   printf '%s\n' "${SOURCE_REVISION}" >"${extracted}/.voicememo-whispercpp-revision"
   mkdir -p "$(dirname "${SOURCE_DIRECTORY}")"
   mv "${extracted}" "${SOURCE_DIRECTORY}"

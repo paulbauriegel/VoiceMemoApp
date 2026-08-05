@@ -183,6 +183,9 @@ private fun VoiceMemoAdaptiveContent(
                     voiceActivityDetectionEnabled =
                         uiState.voiceActivityDetectionEnabled,
                     gpuAccelerationEnabled = uiState.gpuAccelerationEnabled,
+                    transcribeWhileRecordingEnabled =
+                        uiState.transcribeWhileRecordingEnabled,
+                    transcriptionTimingEnabled = uiState.transcriptionTimingEnabled,
                     transcriptionModelId = uiState.transcriptionModelId,
                     onAction = onAction,
                 )

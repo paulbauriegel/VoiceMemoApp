@@ -24,12 +24,9 @@ import wave
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AUDIO = (
-    PROJECT_ROOT
-    / "build/experiments/original-fp16/"
-    "source-1e1772cd-16f0-4b21-bda0-8ba6ffef35da.wav"
-)
-DEFAULT_BASELINE = PROJECT_ROOT / "build/experiments/original-fp16/baseline.json"
+PERSISTENT_INPUT_ROOT = PROJECT_ROOT / "benchmark-inputs/whisper-suite"
+DEFAULT_AUDIO = PERSISTENT_INPUT_ROOT / "reference.wav"
+DEFAULT_BASELINE = PERSISTENT_INPUT_ROOT / "baseline.json"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "build/reports/whisper-benchmark-suite"
 TOKENIZER = PROJECT_ROOT / "app/src/main/generatedAssets/whisper/tokenizer.json"
 GENERATION_CONFIG = (
@@ -44,8 +41,10 @@ TEST_CLASS = (
     "com.example.voicememo.transcription."
     "GpuWholeMemoWerBenchmarkTest#compareWholeMemoBackends"
 )
-LANGUAGE = "de"
+REFERENCE_LANGUAGE = "de"
+AUTO_DETECTED_LANGUAGE = "en"
 LANGUAGE_TOKEN_ID = 50261
+TIMESTAMP_BEGIN_TOKEN_ID = 50365
 SAMPLE_RATE = 16_000
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SAFE_RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,127}\Z")
@@ -85,7 +84,7 @@ CONFIGURATIONS = (
         id="whispercpp-fp16-vulkan",
         label="whisper.cpp FP16 Vulkan",
         runtime="whispercpp",
-        model_path="build/model-assets/whisper.cpp/ggml-large-v3-turbo.bin",
+        model_path="benchmark-inputs/whisper-suite/ggml-large-v3-turbo.bin",
         model_bytes=1_624_555_275,
         model_sha256=(
             "1fc70f774d38eb169993ac391eea357ef"
@@ -103,7 +102,7 @@ CONFIGURATIONS = (
         label="whisper.cpp Q8_0 Vulkan",
         runtime="whispercpp",
         model_path=(
-            "build/model-assets/whisper.cpp/"
+            "benchmark-inputs/whisper-suite/"
             "ggml-large-v3-turbo-q8_0.bin"
         ),
         model_bytes=874_188_075,
@@ -123,8 +122,8 @@ CONFIGURATIONS = (
         label="LiteRT INT8 CPU 2 workers x 3 threads",
         runtime="litert",
         model_path=(
-            "app/src/main/generatedAssets/whisper/"
-            "whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite"
+            "benchmark-inputs/whisper-suite/"
+            "whisper-large-v3-turbo-int8.tflite"
         ),
         model_bytes=1_094_571_944,
         model_sha256=(
@@ -144,8 +143,8 @@ CONFIGURATIONS = (
         label="LiteRT INT8 CPU 4 workers x 3 threads",
         runtime="litert",
         model_path=(
-            "app/src/main/generatedAssets/whisper/"
-            "whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite"
+            "benchmark-inputs/whisper-suite/"
+            "whisper-large-v3-turbo-int8.tflite"
         ),
         model_bytes=1_094_571_944,
         model_sha256=(
@@ -165,7 +164,7 @@ CONFIGURATIONS = (
         label="LiteRT FP16 storage OpenCL with FP32 accumulation",
         runtime="litert",
         model_path=(
-            "build/experiments/original-fp16/"
+            "benchmark-inputs/whisper-suite/"
             "whisper-large-v3-turbo-fp16-gpu-fixed.tflite"
         ),
         model_bytes=1_617_806_560,
@@ -184,8 +183,8 @@ CONFIGURATIONS = (
         label="LiteRT quantized encoder plus FP32 decoder OpenCL",
         runtime="litert",
         model_path=(
-            "build/generated/whisper-full-float-decoder/"
-            "whisper_large_v3_turbo_full_float_decoder.tflite"
+            "benchmark-inputs/whisper-suite/"
+            "whisper-large-v3-turbo-full-float-decoder.tflite"
         ),
         model_bytes=1_779_622_096,
         model_sha256=(
@@ -379,7 +378,7 @@ def stage_private_file(
     expected_sha256: str,
 ) -> None:
     if not re.fullmatch(
-        r"files/(?:gpu-audio|gpu-models|whispercpp-models)/"
+        r"files/(?:gpu-audio|gpu-models|whispercpp-models|encoder-states)/"
         r"[A-Za-z0-9._-]+",
         relative,
     ):
@@ -432,7 +431,7 @@ def stage_private_file(
 
 def remove_private_file(adb_path: str, serial: str, relative: str) -> None:
     if not re.fullmatch(
-        r"files/(?:gpu-audio|gpu-models|whispercpp-models)/"
+        r"files/(?:gpu-audio|gpu-models|whispercpp-models|encoder-states)/"
         r"[A-Za-z0-9._-]+",
         relative,
     ):
@@ -510,6 +509,7 @@ def build_harness() -> tuple[Path, Path]:
             str(PROJECT_ROOT / "gradlew"),
             "--no-daemon",
             "-Pkotlin.compiler.execution.strategy=in-process",
+            "-Pandroid.sourceset.disallowProvider=false",
             "-PincludeWhisperCppBenchmark=true",
             "-PuseFp16Fp32AccumGpuProbe=true",
             ":app:assembleDebug",
@@ -575,8 +575,15 @@ def edit_distance(left: Sequence[Any], right: Sequence[Any]) -> int:
 def comparison(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     reference_words = normalized_words(str(reference["text"]))
     candidate_words = normalized_words(str(candidate["text"]))
-    reference_tokens = [int(value) for value in reference["tokens"]]
-    candidate_tokens = [int(value) for value in candidate["tokens"]]
+    reference_tokens = [
+        int(value)
+        for value in reference["tokens"]
+        if int(value) < TIMESTAMP_BEGIN_TOKEN_ID
+    ]
+    raw_candidate_tokens = [int(value) for value in candidate["tokens"]]
+    candidate_tokens = [
+        value for value in raw_candidate_tokens if value < TIMESTAMP_BEGIN_TOKEN_ID
+    ]
     word_edits = edit_distance(reference_words, candidate_words)
     token_edits = edit_distance(reference_tokens, candidate_tokens)
     if not reference_words or not reference_tokens:
@@ -591,6 +598,9 @@ def comparison(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str
         "token_edits": token_edits,
         "reference_tokens": len(reference_tokens),
         "candidate_tokens": len(candidate_tokens),
+        "candidate_timestamp_tokens": (
+            len(raw_candidate_tokens) - len(candidate_tokens)
+        ),
         "token_error_rate": token_edits / len(reference_tokens),
         "token_error_percent": 100 * token_edits / len(reference_tokens),
         "exact_text_match": reference["text"] == candidate["text"],
@@ -615,7 +625,11 @@ def device_properties(adb_path: str, serial: str) -> dict[str, str]:
     return properties
 
 
-def validate_local_inputs(audio: Path, baseline_path: Path) -> dict[str, Any]:
+def validate_local_inputs(
+    audio: Path,
+    baseline_path: Path,
+    requested_language: str,
+) -> dict[str, Any]:
     for path in (audio, baseline_path, TOKENIZER, GENERATION_CONFIG):
         if not path.is_file():
             raise SuiteError(f"Required benchmark input is missing: {path}")
@@ -624,8 +638,10 @@ def validate_local_inputs(audio: Path, baseline_path: Path) -> dict[str, Any]:
         raise SuiteError("Baseline model ID is not the pinned OpenAI model.")
     if baseline.get("model_revision") != TOKENIZER_REVISION:
         raise SuiteError("Baseline/tokenizer revision is not pinned as expected.")
-    if baseline.get("language") != LANGUAGE:
-        raise SuiteError(f"Baseline language must be forced to {LANGUAGE}.")
+    if baseline.get("language") != requested_language:
+        raise SuiteError(
+            f"Baseline language must match requested mode {requested_language}."
+        )
     expected_samples = int(baseline["audio_samples_16khz"])
     if expected_samples <= 0:
         raise SuiteError("Baseline audio sample count is invalid.")
@@ -650,7 +666,7 @@ def validate_local_inputs(audio: Path, baseline_path: Path) -> dict[str, Any]:
         )
     generation_config = json.loads(GENERATION_CONFIG.read_text(encoding="utf-8"))
     configured_language_token = generation_config.get("lang_to_id", {}).get(
-        f"<|{LANGUAGE}|>"
+        f"<|{REFERENCE_LANGUAGE}|>"
     )
     if configured_language_token != LANGUAGE_TOKEN_ID:
         raise SuiteError(
@@ -668,14 +684,14 @@ def validate_local_inputs(audio: Path, baseline_path: Path) -> dict[str, Any]:
     return baseline
 
 
-def run_instrumentation(
+def instrumentation_arguments(
     *,
-    adb_path: str,
-    serial: str,
     configuration: Configuration,
     model_name: str,
     audio_name: str,
     run_id: str,
+    requested_language: str,
+    timestamp_tokens_enabled: bool,
 ) -> dict[str, Any]:
     arguments = {
         "class": TEST_CLASS,
@@ -684,9 +700,33 @@ def run_instrumentation(
         "externalModelName": model_name,
         "externalModelSha256": configuration.model_sha256,
         "externalAudioName": audio_name,
-        "forcedLanguage": LANGUAGE,
+        "timestampTokensEnabled": str(timestamp_tokens_enabled).lower(),
         **configuration.instrumentation,
     }
+    if requested_language != "auto":
+        arguments["forcedLanguage"] = requested_language
+    return arguments
+
+
+def run_instrumentation(
+    *,
+    adb_path: str,
+    serial: str,
+    configuration: Configuration,
+    model_name: str,
+    audio_name: str,
+    run_id: str,
+    requested_language: str,
+    timestamp_tokens_enabled: bool,
+) -> dict[str, Any]:
+    arguments = instrumentation_arguments(
+        configuration=configuration,
+        model_name=model_name,
+        audio_name=audio_name,
+        run_id=run_id,
+        requested_language=requested_language,
+        timestamp_tokens_enabled=timestamp_tokens_enabled,
+    )
     command = adb(adb_path, serial, "shell", "am", "instrument", "-w", "-r")
     for key, value in arguments.items():
         command.extend(("-e", key, value))
@@ -722,13 +762,24 @@ def validate_report(
     report: dict[str, Any],
     configuration: Configuration,
     expected_samples: int,
+    requested_language: str,
+    timestamp_tokens_enabled: bool,
 ) -> None:
     candidate = report.get("candidate")
     if report.get("status") != "completed" or not isinstance(candidate, dict):
         raise SuiteError(f"Incomplete report for {configuration.id}.")
+    expected_detected_language = (
+        AUTO_DETECTED_LANGUAGE
+        if requested_language == "auto"
+        else requested_language
+    )
     checks = {
-        "requested language": report.get("requested_language") == LANGUAGE,
-        "detected language": candidate.get("detected_language") == LANGUAGE,
+        "requested language": (
+            report.get("requested_language") == requested_language
+        ),
+        "detected language": (
+            candidate.get("detected_language") == expected_detected_language
+        ),
         "model SHA-256": report.get("model_sha256") == configuration.model_sha256,
         "mode": candidate.get("mode") == configuration.expected_mode,
         "sample count": (
@@ -739,6 +790,14 @@ def validate_report(
         "chunks": isinstance(candidate.get("chunks"), list),
         "inference timing": int(candidate.get("inference_wall_millis", 0)) > 0,
         "total timing": int(candidate.get("total_wall_millis", 0)) > 0,
+        "timestamp tokens enabled": (
+            report.get("timestamp_tokens_enabled") is timestamp_tokens_enabled
+        ),
+        "timestamp token count": (
+            int(candidate.get("timestamp_token_count", 0)) > 0
+            if timestamp_tokens_enabled
+            else int(candidate.get("timestamp_token_count", 0)) == 0
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -796,6 +855,10 @@ def summarize(
             float(item["raw_report"]["candidate"]["token_count"])
             for item in runs
         ]
+        timestamp_token_counts = [
+            float(item["raw_report"]["candidate"]["timestamp_token_count"])
+            for item in runs
+        ]
         text_hashes = [
             hashlib.sha256(
                 item["raw_report"]["candidate"]["text"].encode()
@@ -819,6 +882,7 @@ def summarize(
                 ),
                 "word_error_percent": aggregate(wers),
                 "token_count": aggregate(token_counts),
+                "timestamp_token_count": aggregate(timestamp_token_counts),
                 "pss_kib": aggregate(pss),
                 "deterministic_text": len(set(text_hashes)) == 1,
                 "deterministic_tokens": len(set(token_hashes)) == 1,
@@ -830,7 +894,8 @@ def summarize(
         "schema_version": 1,
         "suite_id": suite_id,
         "status": "completed",
-        "language": LANGUAGE,
+        "language": manifest["language"],
+        "timestamp_tokens_enabled": manifest["timestamp_tokens_enabled"],
         "runs_per_configuration": manifest["runs_per_configuration"],
         "audio": manifest["audio"],
         "baseline": manifest["baseline"],
@@ -842,26 +907,29 @@ def write_markdown(summary: dict[str, Any], destination: Path) -> None:
     lines = [
         f"# Whisper Android benchmark suite {summary['suite_id']}",
         "",
-        f"- Forced language: `{summary['language']}`",
+        f"- Requested language: `{summary['language']}`",
+        f"- Timestamp tokens enabled: `{str(summary['timestamp_tokens_enabled']).lower()}`",
         f"- Runs per configuration: {summary['runs_per_configuration']}",
         f"- Audio SHA-256: `{summary['audio']['sha256']}`",
         f"- Baseline SHA-256: `{summary['baseline']['sha256']}`",
         "",
         "| Configuration | Median inference | Range | Median RTF | "
-        "Median WER | Median PSS | Deterministic |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "Median WER | Median timestamp tokens | Median PSS | Deterministic |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for item in summary["configurations"]:
         inference = item["inference_millis"]
         lines.append(
             "| {label} | {median:.3f} s | {minimum:.3f}–{maximum:.3f} s | "
-            "{rtf:.3f} | {wer:.3f}% | {pss:.2f} GiB | {deterministic} |".format(
+            "{rtf:.3f} | {wer:.3f}% | {timestamps:.0f} | {pss:.2f} GiB | "
+            "{deterministic} |".format(
                 label=item["label"],
                 median=inference["median"] / 1000,
                 minimum=inference["min"] / 1000,
                 maximum=inference["max"] / 1000,
                 rtf=item["real_time_factor"]["median"],
                 wer=item["word_error_percent"]["median"],
+                timestamps=item["timestamp_token_count"]["median"],
                 pss=item["pss_kib"]["median"] / 1024 / 1024,
                 deterministic=(
                     "yes"
@@ -876,7 +944,7 @@ def write_markdown(summary: dict[str, Any], destination: Path) -> None:
 def run_suite(args: argparse.Namespace) -> Path:
     audio = args.audio.expanduser().resolve()
     baseline_path = args.baseline.expanduser().resolve()
-    baseline = validate_local_inputs(audio, baseline_path)
+    baseline = validate_local_inputs(audio, baseline_path, args.language)
     adb_path = args.adb
     serial = one_device(adb_path, args.serial)
     assert_device_idle(adb_path, serial)
@@ -902,7 +970,8 @@ def run_suite(args: argparse.Namespace) -> Path:
         "status": "preparing",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "runs_per_configuration": args.runs,
-        "language": LANGUAGE,
+        "language": args.language,
+        "timestamp_tokens_enabled": args.timestamp_tokens_enabled,
         "audio": {
             "path": str(audio),
             "bytes": audio.stat().st_size,
@@ -924,8 +993,12 @@ def run_suite(args: argparse.Namespace) -> Path:
             "revision": TOKENIZER_REVISION,
             "sha256": tokenizer_sha,
             "generation_config_sha256": generation_config_sha,
-            "forced_language": LANGUAGE,
-            "forced_language_token_id": LANGUAGE_TOKEN_ID,
+            "forced_language": (
+                None if args.language == "auto" else args.language
+            ),
+            "forced_language_token_id": (
+                None if args.language == "auto" else LANGUAGE_TOKEN_ID
+            ),
         },
         "whisper_cpp_revision": WHISPER_CPP_REVISION,
         "configurations": [asdict(value) for value in CONFIGURATIONS],
@@ -939,6 +1012,7 @@ def run_suite(args: argparse.Namespace) -> Path:
             "suite_id",
             "runs_per_configuration",
             "language",
+            "timestamp_tokens_enabled",
             "audio",
             "baseline",
             "tokenizer",
@@ -1029,6 +1103,8 @@ def run_suite(args: argparse.Namespace) -> Path:
                     raw_report,
                     configuration,
                     int(baseline["audio_samples_16khz"]),
+                    args.language,
+                    args.timestamp_tokens_enabled,
                 )
                 compared = comparison(baseline, raw_report["candidate"])
                 if evidence.get("raw_report_sha256") != sha256(raw_path):
@@ -1106,11 +1182,15 @@ def run_suite(args: argparse.Namespace) -> Path:
                         model_name=model_name,
                         audio_name=audio_name,
                         run_id=run_id,
+                        requested_language=args.language,
+                        timestamp_tokens_enabled=args.timestamp_tokens_enabled,
                     )
                     validate_report(
                         raw_report,
                         configuration,
                         int(baseline["audio_samples_16khz"]),
+                        args.language,
+                        args.timestamp_tokens_enabled,
                     )
                     post_thermal = thermal_snapshot(adb_path, serial)
                     raw_path = (
@@ -1136,8 +1216,15 @@ def run_suite(args: argparse.Namespace) -> Path:
                         "model_sha256": configuration.model_sha256,
                         "app_apk_sha256": app_sha,
                         "test_apk_sha256": test_sha,
-                        "requested_language": LANGUAGE,
-                        "forced_language_token_id": LANGUAGE_TOKEN_ID,
+                        "requested_language": args.language,
+                        "expected_detected_language": (
+                            AUTO_DETECTED_LANGUAGE
+                            if args.language == "auto"
+                            else args.language
+                        ),
+                        "forced_language_token_id": (
+                            None if args.language == "auto" else LANGUAGE_TOKEN_ID
+                        ),
                         "thermal_before": pre_thermal,
                         "thermal_after": post_thermal,
                         "comparison": compared,
@@ -1181,8 +1268,31 @@ def parser() -> argparse.ArgumentParser:
     for command in ("plan", "run"):
         child = subparsers.add_parser(command)
         child.add_argument("--audio", type=Path, default=DEFAULT_AUDIO)
-        child.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
+        child.add_argument(
+            "--baseline",
+            type=Path,
+            help=(
+                "Defaults to baseline.json for forced German and "
+                "baseline-auto.json for auto language."
+            ),
+        )
         child.add_argument("--runs", type=int, default=3)
+        child.add_argument(
+            "--language",
+            choices=("de", "auto"),
+            default="de",
+            help="Force German (default) or let each backend auto-detect language.",
+        )
+        child.add_argument(
+            "--timestamp-tokens-enabled",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help=(
+                "Enable timestamp-token decoding. Use "
+                "--no-timestamp-tokens-enabled to reproduce older text-only "
+                "benchmark suites."
+            ),
+        )
         child.add_argument(
             "--configuration",
             action="append",
@@ -1215,6 +1325,12 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     global CONFIGURATIONS
     args = parser().parse_args(argv)
+    if args.baseline is None:
+        args.baseline = (
+            PERSISTENT_INPUT_ROOT / "baseline-auto.json"
+            if args.language == "auto"
+            else DEFAULT_BASELINE
+        )
     if args.configuration:
         requested = set(args.configuration)
         CONFIGURATIONS = tuple(
@@ -1228,12 +1344,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         baseline = validate_local_inputs(
             args.audio.expanduser().resolve(),
             args.baseline.expanduser().resolve(),
+            args.language,
         )
         print(
             json.dumps(
                 {
                     "runs": args.runs,
-                    "language": LANGUAGE,
+                    "language": args.language,
+                    "timestamp_tokens_enabled": args.timestamp_tokens_enabled,
                     "audio_samples_16khz": baseline["audio_samples_16khz"],
                     "configurations": [asdict(value) for value in CONFIGURATIONS],
                 },

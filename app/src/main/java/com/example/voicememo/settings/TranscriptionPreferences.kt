@@ -33,6 +33,18 @@ class TranscriptionPreferences(
             preferences.edit().putBoolean(KEY_GPU_ACCELERATION_ENABLED, value).apply()
         }
 
+    var transcribeWhileRecordingEnabled: Boolean
+        get() = preferences.getBoolean(KEY_TRANSCRIBE_WHILE_RECORDING_ENABLED, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_TRANSCRIBE_WHILE_RECORDING_ENABLED, value).apply()
+        }
+
+    var transcriptionTimingEnabled: Boolean
+        get() = preferences.getBoolean(KEY_TRANSCRIPTION_TIMING_ENABLED, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_TRANSCRIPTION_TIMING_ENABLED, value).apply()
+        }
+
     var transcriptionModelId: String
         get() = preferences.getString(
             KEY_TRANSCRIPTION_MODEL_ID,
@@ -50,6 +62,9 @@ class TranscriptionPreferences(
         const val KEY_TIMESTAMPS_ENABLED = "whisper_timestamps_enabled"
         const val KEY_VAD_ENABLED = "voice_activity_detection_enabled"
         const val KEY_GPU_ACCELERATION_ENABLED = "gpu_acceleration_enabled"
+        const val KEY_TRANSCRIBE_WHILE_RECORDING_ENABLED =
+            "transcribe_while_recording_enabled"
+        const val KEY_TRANSCRIPTION_TIMING_ENABLED = "transcription_timing_enabled"
         const val KEY_TRANSCRIPTION_MODEL_ID = "transcription_model_id"
     }
 }

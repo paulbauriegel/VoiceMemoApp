@@ -13,6 +13,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 interface TranscriptionCoordinator {
+    fun enqueueWhileRecording(
+        memoId: String,
+        memoDirectory: String,
+        timestampsEnabled: Boolean,
+        voiceActivityDetectionEnabled: Boolean,
+        gpuAccelerationEnabled: Boolean,
+    )
+
     suspend fun enqueue(
         memoId: String,
         languageCode: String?,
@@ -20,6 +28,7 @@ interface TranscriptionCoordinator {
         voiceActivityDetectionEnabled: Boolean = true,
         gpuAccelerationEnabled: Boolean = true,
         transcriptionModelId: String = TranscriptionModel.DEFAULT.id,
+        usePreTranscribedWindows: Boolean = false,
     ): String
     suspend fun cancel(memoId: String, jobId: String?)
 }
@@ -28,6 +37,45 @@ class WorkManagerTranscriptionCoordinator(
     private val workManager: WorkManager,
     private val repository: MemoRepository,
 ) : TranscriptionCoordinator {
+    override fun enqueueWhileRecording(
+        memoId: String,
+        memoDirectory: String,
+        timestampsEnabled: Boolean,
+        voiceActivityDetectionEnabled: Boolean,
+        gpuAccelerationEnabled: Boolean,
+    ) {
+        val request = OneTimeWorkRequestBuilder<WhisperPreTranscriptionWorker>()
+            .setInputData(
+                Data.Builder()
+                    .putString(WhisperPreTranscriptionWorker.KEY_MEMO_ID, memoId)
+                    .putString(
+                        WhisperPreTranscriptionWorker.KEY_MEMO_DIRECTORY,
+                        memoDirectory,
+                    )
+                    .putBoolean(
+                        WhisperPreTranscriptionWorker.KEY_TIMESTAMPS_ENABLED,
+                        timestampsEnabled,
+                    )
+                    .putBoolean(
+                        WhisperPreTranscriptionWorker.KEY_VAD_ENABLED,
+                        voiceActivityDetectionEnabled,
+                    )
+                    .putBoolean(
+                        WhisperPreTranscriptionWorker.KEY_GPU_ACCELERATION_ENABLED,
+                        gpuAccelerationEnabled,
+                    )
+                    .build(),
+            )
+            .addTag(QUEUE_TAG)
+            .addTag(memoTag(memoId))
+            .build()
+        workManager.beginUniqueWork(
+            FIFO_WORK_NAME,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            request,
+        ).enqueue()
+    }
+
     override suspend fun enqueue(
         memoId: String,
         languageCode: String?,
@@ -35,6 +83,7 @@ class WorkManagerTranscriptionCoordinator(
         voiceActivityDetectionEnabled: Boolean,
         gpuAccelerationEnabled: Boolean,
         transcriptionModelId: String,
+        usePreTranscribedWindows: Boolean,
     ): String {
         val normalizedLanguage = languageCode?.takeUnless { it == "auto" }
         val job = repository.createTranscriptionJob(
@@ -64,6 +113,10 @@ class WorkManagerTranscriptionCoordinator(
                     .putString(
                         TranscriptionWorker.KEY_TRANSCRIPTION_MODEL_ID,
                         job.transcriptionModelId,
+                    )
+                    .putBoolean(
+                        TranscriptionWorker.KEY_USE_PRETRANSCRIBED_WINDOWS,
+                        usePreTranscribedWindows,
                     )
                     .build(),
             )

@@ -61,6 +61,10 @@ class GpuWholeMemoWerBenchmarkTest {
             arguments.getString(ARG_WHISPER_CPP_BACKEND)
                 ?: WhisperCppBenchmarkBackend.CPU.argument,
         )
+        val timestampTokensEnabled =
+            arguments.getString(ARG_TIMESTAMP_TOKENS_ENABLED)
+                ?.toBooleanStrictOrNull()
+                ?: false
         require(cpuWorkers in setOf(1, 2, 4)) {
             "CPU workers must be 1, 2, or 4."
         }
@@ -70,15 +74,30 @@ class GpuWholeMemoWerBenchmarkTest {
         }
         val externalModelName = arguments.getString(ARG_EXTERNAL_MODEL_NAME)
         val externalModelSha256 = arguments.getString(ARG_EXTERNAL_MODEL_SHA256)
+        val externalEncoderModelName = arguments.getString(ARG_EXTERNAL_ENCODER_MODEL_NAME)
+        val externalEncoderModelSha256 =
+            arguments.getString(ARG_EXTERNAL_ENCODER_MODEL_SHA256)
+        val externalDecoderModelName = arguments.getString(ARG_EXTERNAL_DECODER_MODEL_NAME)
+        val externalDecoderModelSha256 =
+            arguments.getString(ARG_EXTERNAL_DECODER_MODEL_SHA256)
         val externalAudioName = arguments.getString(ARG_EXTERNAL_AUDIO_NAME)
         val memoId = arguments.getString(ARG_MEMO_ID)
         val forcedLanguage = arguments.getString(ARG_FORCED_LANGUAGE)
         val gpuPrecisionName = arguments.getString(ARG_GPU_PRECISION) ?: GPU_PRECISION_FP32
-        val gpuPrecision = when (gpuPrecisionName) {
+        fun parseGpuPrecision(value: String): CompiledModel.GpuOptions.Precision = when (value) {
             GPU_PRECISION_FP32 -> CompiledModel.GpuOptions.Precision.FP32
+            GPU_PRECISION_FP16_NATIVE -> CompiledModel.GpuOptions.Precision.FP16
             GPU_PRECISION_FP16_FP32_ACCUM -> CompiledModel.GpuOptions.Precision.FP16
-            else -> error("Unsupported GPU precision mode: $gpuPrecisionName")
+            else -> error("Unsupported GPU precision mode: $value")
         }
+        val gpuPrecision = parseGpuPrecision(gpuPrecisionName)
+        val encoderGpuPrecisionName =
+            arguments.getString(ARG_ENCODER_GPU_PRECISION) ?: gpuPrecisionName
+        val decoderGpuPrecisionName =
+            arguments.getString(ARG_DECODER_GPU_PRECISION) ?: gpuPrecisionName
+        val encoderGpuPrecision = parseGpuPrecision(encoderGpuPrecisionName)
+        val decoderGpuPrecision = parseGpuPrecision(decoderGpuPrecisionName)
+        val splitModelRequested = externalEncoderModelName != null || externalDecoderModelName != null
         val useFullFloatDecoder =
             arguments.getString(ARG_USE_FULL_FLOAT_DECODER)
                 ?.toBooleanStrictOrNull()
@@ -90,8 +109,8 @@ class GpuWholeMemoWerBenchmarkTest {
         require(!promotionGate || useFullFloatDecoder) {
             "The GPU promotion gate requires the complete FLOAT32 decoder model."
         }
-        require(!candidateOnly || externalModelName != null) {
-            "Candidate-only mode requires an external model."
+        require(!candidateOnly || externalModelName != null || splitModelRequested) {
+            "Candidate-only mode requires an external combined or split model."
         }
         require((externalModelName == null) == (externalModelSha256 == null)) {
             "External model name and SHA-256 must be supplied together."
@@ -101,6 +120,25 @@ class GpuWholeMemoWerBenchmarkTest {
                 SAFE_SHA256.matches(externalModelSha256),
         ) {
             "External model SHA-256 is invalid."
+        }
+        require(
+            listOf(
+                externalEncoderModelName,
+                externalEncoderModelSha256,
+                externalDecoderModelName,
+                externalDecoderModelSha256,
+            ).all { it != null } ||
+                listOf(
+                    externalEncoderModelName,
+                    externalEncoderModelSha256,
+                    externalDecoderModelName,
+                    externalDecoderModelSha256,
+                ).all { it == null },
+        ) {
+            "Split model names and SHA-256 values must be supplied together."
+        }
+        require(!splitModelRequested || candidateBackend == CANDIDATE_BACKEND_GPU) {
+            "Split models are supported only by the GPU benchmark candidate."
         }
         val whisperCppModel =
             if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
@@ -135,6 +173,20 @@ class GpuWholeMemoWerBenchmarkTest {
                     ".tflite"
                 },
             )
+        }
+        val externalEncoderModelFile = externalEncoderModelName?.let { name ->
+            requireStagedFile(context, EXTERNAL_MODEL_DIRECTORY, name, ".tflite").also {
+                require(sha256(it) == externalEncoderModelSha256) {
+                    "Staged encoder model SHA-256 does not match."
+                }
+            }
+        }
+        val externalDecoderModelFile = externalDecoderModelName?.let { name ->
+            requireStagedFile(context, EXTERNAL_MODEL_DIRECTORY, name, ".tflite").also {
+                require(sha256(it) == externalDecoderModelSha256) {
+                    "Staged decoder model SHA-256 does not match."
+                }
+            }
         }
         if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
             val modelFile = requireNotNull(externalModelFile)
@@ -199,15 +251,22 @@ class GpuWholeMemoWerBenchmarkTest {
             .put("whisper_cpp_threads", whisperCppThreads)
             .put("whisper_cpp_backend", whisperCppBackend.argument)
             .put("whisper_cpp_model", whisperCppModel?.argument ?: JSONObject.NULL)
+            .put("timestamp_tokens_enabled", timestampTokensEnabled)
             .put("use_full_float_decoder", useFullFloatDecoder)
             .put("promotion_gate", promotionGate)
             .put("external_model_name", externalModelName ?: JSONObject.NULL)
+            .put("external_encoder_model_name", externalEncoderModelName ?: JSONObject.NULL)
+            .put("external_decoder_model_name", externalDecoderModelName ?: JSONObject.NULL)
             .put("requested_language", forcedLanguage ?: "auto")
             .put("gpu_precision", gpuPrecisionName)
+            .put("encoder_gpu_precision", encoderGpuPrecisionName)
+            .put("decoder_gpu_precision", decoderGpuPrecisionName)
             .put(
                 "model_sha256",
-                externalModelSha256 ?: WhisperAssets.MODEL_SHA256,
+                externalModelSha256 ?: externalDecoderModelSha256 ?: WhisperAssets.MODEL_SHA256,
             )
+            .put("encoder_model_sha256", externalEncoderModelSha256 ?: JSONObject.NULL)
+            .put("decoder_model_sha256", externalDecoderModelSha256 ?: JSONObject.NULL)
             .put("status", STATUS_RUNNING)
         fun publishCheckpoint() {
             temporaryReport.writeText(report.toString(2))
@@ -228,7 +287,7 @@ class GpuWholeMemoWerBenchmarkTest {
             report.put("audio", audioInfo)
 
             if (candidateOnly) {
-                val externalModelPath = requireNotNull(externalModelFile).absolutePath
+                val externalModelPath = externalModelFile?.absolutePath
                 val candidate = benchmarkWithEngines(
                     context = context,
                     audioFile = audioFile,
@@ -253,6 +312,12 @@ class GpuWholeMemoWerBenchmarkTest {
                         candidateBackend == CANDIDATE_BACKEND_CPU && cpuWorkers == 4 ->
                             Mode.CPU_4X3
                         candidateBackend == CANDIDATE_BACKEND_CPU -> Mode.CPU_2X3
+                        splitModelRequested -> splitGpuMode(
+                            encoderGpuPrecisionName,
+                            decoderGpuPrecisionName,
+                        )
+                        gpuPrecisionName == GPU_PRECISION_FP16_NATIVE ->
+                            Mode.FULL_GPU_FP16_NATIVE_NO_SOURCE_QUANT
                         gpuPrecisionName == GPU_PRECISION_FP16_FP32_ACCUM ->
                             Mode.FULL_GPU_FP16_FP32_ACCUM_NO_SOURCE_QUANT
                         else -> Mode.FULL_GPU_NO_SOURCE_QUANT
@@ -265,13 +330,15 @@ class GpuWholeMemoWerBenchmarkTest {
                                     modelFile = requireNotNull(externalModelFile),
                                     threadCount = whisperCppThreads,
                                     backend = whisperCppBackend,
+                                    timestampTokensEnabled = timestampTokensEnabled,
                                 ),
                             )
                             CANDIDATE_BACKEND_CPU -> openCpuEngines(
                                 context = context,
                                 workerCount = cpuWorkers,
                                 threadCount = cpuThreads,
-                                modelFilePath = externalModelPath,
+                                modelFilePath = requireNotNull(externalModelPath),
+                                timestampTokensEnabled = timestampTokensEnabled,
                             )
                             else -> listOf(
                                 LiteRtFullGpuWhisperEngine.open(
@@ -279,6 +346,13 @@ class GpuWholeMemoWerBenchmarkTest {
                                     allowSourceQuantizedFcConvOps = false,
                                     diagnosticPrecision = gpuPrecision,
                                     diagnosticModelFilePath = externalModelPath,
+                                    diagnosticEncoderModelFilePath =
+                                        externalEncoderModelFile?.absolutePath,
+                                    diagnosticDecoderModelFilePath =
+                                        externalDecoderModelFile?.absolutePath,
+                                    diagnosticEncoderPrecision = encoderGpuPrecision,
+                                    diagnosticDecoderPrecision = decoderGpuPrecision,
+                                    timestampsEnabled = timestampTokensEnabled,
                                 ),
                             )
                         }
@@ -536,6 +610,7 @@ class GpuWholeMemoWerBenchmarkTest {
         workerCount: Int,
         threadCount: Int,
         modelFilePath: String,
+        timestampTokensEnabled: Boolean,
     ): List<WhisperEngine> {
         val engines = mutableListOf<WhisperEngine>()
         try {
@@ -543,6 +618,7 @@ class GpuWholeMemoWerBenchmarkTest {
                 engines += LiteRtWhisperEngine.open(
                     context = context,
                     threadCount = threadCount,
+                    timestampsEnabled = timestampTokensEnabled,
                     diagnosticModelFilePath = modelFilePath,
                 )
             }
@@ -606,6 +682,12 @@ class GpuWholeMemoWerBenchmarkTest {
                 .put("text", transcript.text)
                 .put("tokens", JSONArray(transcript.tokens))
                 .put("token_count", transcript.tokens.size)
+                .put(
+                    "timestamp_token_count",
+                    transcript.tokens.count {
+                        it >= WhisperTimestampTokens.DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID
+                    },
+                )
                 .put("word_count", normalizedWords(transcript.text).size)
                 .put("warnings", JSONArray(transcript.warnings))
                 .put("memory_after_inference", memory)
@@ -620,6 +702,13 @@ class GpuWholeMemoWerBenchmarkTest {
                                     .put("end_sample", chunk.window.endSample)
                                     .put("token_count", chunk.result.tokens.size)
                                     .put("tokens", JSONArray(chunk.result.tokens))
+                                    .put(
+                                        "timestamp_token_count",
+                                        chunk.result.tokens.count {
+                                            it >= WhisperTimestampTokens
+                                                .DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID
+                                        },
+                                    )
                                     .put(
                                         "inference_millis",
                                         chunk.result.inferenceMillis,
@@ -651,6 +740,17 @@ class GpuWholeMemoWerBenchmarkTest {
             return result
         }
     }
+
+    private fun splitGpuMode(encoderPrecision: String, decoderPrecision: String): Mode =
+        when (encoderPrecision to decoderPrecision) {
+            GPU_PRECISION_FP32 to GPU_PRECISION_FP32 -> Mode.SPLIT_GPU_FP32_FP32
+            GPU_PRECISION_FP32 to GPU_PRECISION_FP16_NATIVE -> Mode.SPLIT_GPU_FP32_FP16
+            GPU_PRECISION_FP16_NATIVE to GPU_PRECISION_FP32 -> Mode.SPLIT_GPU_FP16_FP32
+            GPU_PRECISION_FP16_NATIVE to GPU_PRECISION_FP16_NATIVE -> Mode.SPLIT_GPU_FP16_FP16
+            else -> error(
+                "Split benchmark supports only native FP32/FP16 precision combinations.",
+            )
+        }
 
     private enum class Mode(
         val id: String,
@@ -705,6 +805,46 @@ class GpuWholeMemoWerBenchmarkTest {
             frontend = "CPU",
             encoder = "GPU_OPENCL_F32_F16_NO_SOURCE_QUANT",
             decoder = "GPU_OPENCL_F32_F16_WITH_CPU_GATHER_NO_SOURCE_QUANT",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        FULL_GPU_FP16_NATIVE_NO_SOURCE_QUANT(
+            id = "gpu-native-fp16-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP16_NO_SOURCE_QUANT",
+            decoder = "GPU_OPENCL_FP16_WITH_CPU_GATHER_NO_SOURCE_QUANT",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        SPLIT_GPU_FP32_FP32(
+            id = "split-gpu-encoder-fp32-decoder-fp32-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32_NO_SOURCE_QUANT_SPLIT_MODEL",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER_SPLIT_MODEL",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        SPLIT_GPU_FP32_FP16(
+            id = "split-gpu-encoder-fp32-decoder-fp16-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP32_NO_SOURCE_QUANT_SPLIT_MODEL",
+            decoder = "GPU_OPENCL_FP16_WITH_CPU_GATHER_SPLIT_MODEL",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        SPLIT_GPU_FP16_FP32(
+            id = "split-gpu-encoder-fp16-decoder-fp32-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP16_NO_SOURCE_QUANT_SPLIT_MODEL",
+            decoder = "GPU_OPENCL_FP32_WITH_CPU_GATHER_SPLIT_MODEL",
+            tokenSelection = "CPU",
+            neuralModelStrictlyGpuOnly = false,
+        ),
+        SPLIT_GPU_FP16_FP16(
+            id = "split-gpu-encoder-fp16-decoder-fp16-no-source-quant",
+            frontend = "CPU",
+            encoder = "GPU_OPENCL_FP16_NO_SOURCE_QUANT_SPLIT_MODEL",
+            decoder = "GPU_OPENCL_FP16_WITH_CPU_GATHER_SPLIT_MODEL",
             tokenSelection = "CPU",
             neuralModelStrictlyGpuOnly = false,
         ),
@@ -846,11 +986,18 @@ class GpuWholeMemoWerBenchmarkTest {
         private const val ARG_CPU_THREADS = "cpuThreads"
         private const val ARG_WHISPER_CPP_THREADS = "whisperCppThreads"
         private const val ARG_WHISPER_CPP_BACKEND = "whisperCppBackend"
+        private const val ARG_TIMESTAMP_TOKENS_ENABLED = "timestampTokensEnabled"
         private const val ARG_EXTERNAL_MODEL_NAME = "externalModelName"
         private const val ARG_EXTERNAL_MODEL_SHA256 = "externalModelSha256"
+        private const val ARG_EXTERNAL_ENCODER_MODEL_NAME = "externalEncoderModelName"
+        private const val ARG_EXTERNAL_ENCODER_MODEL_SHA256 = "externalEncoderModelSha256"
+        private const val ARG_EXTERNAL_DECODER_MODEL_NAME = "externalDecoderModelName"
+        private const val ARG_EXTERNAL_DECODER_MODEL_SHA256 = "externalDecoderModelSha256"
         private const val ARG_EXTERNAL_AUDIO_NAME = "externalAudioName"
         private const val ARG_FORCED_LANGUAGE = "forcedLanguage"
         private const val ARG_GPU_PRECISION = "gpuPrecision"
+        private const val ARG_ENCODER_GPU_PRECISION = "encoderGpuPrecision"
+        private const val ARG_DECODER_GPU_PRECISION = "decoderGpuPrecision"
         private const val ARG_USE_FULL_FLOAT_DECODER = "useFullFloatDecoder"
         private const val ARG_PROMOTION_GATE = "promotionGate"
         private const val FULL_FLOAT_DECODER_ASSET =
@@ -863,6 +1010,7 @@ class GpuWholeMemoWerBenchmarkTest {
         private const val STATUS_COMPLETED = "completed"
         private const val STATUS_FAILED = "failed"
         private const val GPU_PRECISION_FP32 = "fp32"
+        private const val GPU_PRECISION_FP16_NATIVE = "fp16-native"
         private const val GPU_PRECISION_FP16_FP32_ACCUM = "fp16-fp32-accum"
         private const val CANDIDATE_BACKEND_GPU = "gpu"
         private const val CANDIDATE_BACKEND_CPU = "cpu"

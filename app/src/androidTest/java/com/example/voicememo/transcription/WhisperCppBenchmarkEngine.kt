@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal class WhisperCppBenchmarkEngine private constructor(
     private val handle: AtomicLong,
     private val backend: WhisperCppBenchmarkBackend,
+    private val timestampTokensEnabled: Boolean,
 ) : WhisperEngine {
     override fun transcribeChunk(
         audio: FloatArray,
@@ -42,12 +43,36 @@ internal class WhisperCppBenchmarkEngine private constructor(
             truncated = false,
             warnings = listOf(
                 "benchmark-only:backend=${backend.argument}:${WhisperCppBenchmarkNative.runtimeInfo()}",
+                "benchmark-only:timestamp-tokens=$timestampTokensEnabled",
             ),
         )
     }
 
     override fun decodeTokens(tokens: List<Int>): String = synchronized(handle) {
         WhisperCppBenchmarkNative.decode(requireOpenHandle(), tokens.toIntArray())
+    }
+
+    internal fun encodeMel(mel: FloatArray): FloatArray = synchronized(handle) {
+        require(mel.size == WhisperFeatureExtractor.MEL_BINS * WhisperFeatureExtractor.FRAMES) {
+            "Shared Whisper mel tensor has ${mel.size} values."
+        }
+        WhisperCppBenchmarkNative.encodeMel(
+            requireOpenHandle(),
+            mel,
+            WhisperFeatureExtractor.FRAMES,
+            WhisperFeatureExtractor.MEL_BINS,
+        )
+    }
+
+    internal fun encoderMillis(): Long = synchronized(handle) {
+        WhisperCppBenchmarkNative.getEncoderMillis(requireOpenHandle())
+    }
+
+    internal fun encoderBlockStates(): List<FloatArray> = synchronized(handle) {
+        val nativeHandle = requireOpenHandle()
+        List(WhisperCppBenchmarkNative.getEncoderBlockCount(nativeHandle)) { index ->
+            WhisperCppBenchmarkNative.getEncoderBlockState(nativeHandle, index)
+        }
     }
 
     override fun close() = synchronized(handle) {
@@ -67,6 +92,7 @@ internal class WhisperCppBenchmarkEngine private constructor(
             modelFile: File,
             threadCount: Int,
             backend: WhisperCppBenchmarkBackend = WhisperCppBenchmarkBackend.CPU,
+            timestampTokensEnabled: Boolean = false,
         ): WhisperCppBenchmarkEngine {
             check(isWhisperCppBenchmarkIncluded()) {
                 "Rebuild with -PincludeWhisperCppBenchmark=true."
@@ -88,9 +114,11 @@ internal class WhisperCppBenchmarkEngine private constructor(
                         modelPath = modelFile.absolutePath,
                         threads = threadCount,
                         useVulkan = backend == WhisperCppBenchmarkBackend.VULKAN,
+                        timestampTokensEnabled = timestampTokensEnabled,
                     ).also { check(it != 0L) { "whisper.cpp returned an empty handle." } },
                 ),
                 backend = backend,
+                timestampTokensEnabled = timestampTokensEnabled,
             )
         }
     }
@@ -162,12 +190,26 @@ internal object WhisperCppBenchmarkNative {
         loaded = true
     }
 
-    external fun create(modelPath: String, threads: Int, useVulkan: Boolean): Long
+    external fun create(
+        modelPath: String,
+        threads: Int,
+        useVulkan: Boolean,
+        timestampTokensEnabled: Boolean,
+    ): Long
     external fun transcribe(handle: Long, audio: FloatArray, language: String)
     external fun getText(handle: Long): String
     external fun getLanguage(handle: Long): String
     external fun getTokens(handle: Long): IntArray
     external fun getInferenceMillis(handle: Long): Long
+    external fun encodeMel(
+        handle: Long,
+        mel: FloatArray,
+        frameCount: Int,
+        melBinCount: Int,
+    ): FloatArray
+    external fun getEncoderMillis(handle: Long): Long
+    external fun getEncoderBlockCount(handle: Long): Int
+    external fun getEncoderBlockState(handle: Long, index: Int): FloatArray
     external fun decode(handle: Long, tokens: IntArray): String
     external fun runtimeInfo(): String
     external fun destroy(handle: Long)

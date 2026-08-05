@@ -170,6 +170,30 @@ class VoiceMemoSettingsScreenTest {
     }
 
     @Test
+    fun transcriptionTimingRowReflectsStateAndDispatchesToggle() {
+        var lastAction: VoiceMemoUiAction? = null
+
+        composeRule.setContent {
+            VoiceMemoTheme(dynamicColor = false) {
+                VoiceMemoLicensesScreen(
+                    licenses = emptyList(),
+                    isImportingAudio = false,
+                    transcriptionTimingEnabled = true,
+                    onAction = { lastAction = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("settings_transcription_timing")
+            .performScrollTo()
+            .performClick()
+        assertEquals(
+            VoiceMemoUiAction.TranscriptionTimingChanged(false),
+            lastAction,
+        )
+    }
+
+    @Test
     fun voiceActivityDetectionRowCanDisableVad() {
         var lastAction: VoiceMemoUiAction? = null
 

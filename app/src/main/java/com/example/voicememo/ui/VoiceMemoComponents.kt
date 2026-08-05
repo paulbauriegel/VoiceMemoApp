@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -108,15 +109,17 @@ fun VoiceMemoWaveform(
     inactiveColor: Color = MaterialTheme.colorScheme.outlineVariant,
 ) {
     val displayAmplitudes = remember(amplitudes) {
-        amplitudes
-            .ifEmpty {
-                listOf(
-                    .12f, .18f, .22f, .16f, .28f, .20f, .14f, .24f, .19f, .13f,
-                    .17f, .22f, .15f, .20f, .12f, .18f, .24f, .16f, .14f, .22f,
-                    .18f, .13f, .19f, .15f,
-                )
-            }
-            .sampledForDisplay(maxBars = 72)
+        if (amplitudes.isEmpty()) {
+            listOf(
+                .12f, .18f, .22f, .16f, .28f, .20f, .14f, .24f, .19f, .13f,
+                .17f, .22f, .15f, .20f, .12f, .18f, .24f, .16f, .14f, .22f,
+                .18f, .13f, .19f, .15f,
+            )
+        } else {
+            normalizeWaveformForDisplay(
+                amplitudes.sampledForDisplay(maxBars = 72),
+            )
+        }
     }
     val safeProgress = progress.coerceIn(0f, 1f)
 
@@ -162,6 +165,29 @@ fun VoiceMemoWaveform(
     }
 }
 
+/**
+ * Applies display-only gain so quiet recordings remain visually readable.
+ *
+ * The 95th percentile, rather than the loudest bar, controls gain so a click or
+ * handling spike cannot flatten the rest of the waveform. Gain is capped to
+ * avoid turning near-silence into a misleading full-height signal.
+ */
+internal fun normalizeWaveformForDisplay(amplitudes: List<Float>): List<Float> {
+    if (amplitudes.isEmpty()) return emptyList()
+    val sanitized = amplitudes.map { amplitude ->
+        amplitude.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
+    }
+    val nonZero = sanitized.filter { it > 0f }.sorted()
+    if (nonZero.isEmpty()) return sanitized
+    val referenceIndex = ((nonZero.lastIndex * 95) / 100)
+        .coerceIn(nonZero.indices)
+    val reference = nonZero[referenceIndex]
+    if (reference >= WAVEFORM_DISPLAY_TARGET || reference <= 0f) return sanitized
+    val gain = (WAVEFORM_DISPLAY_TARGET / reference)
+        .coerceAtMost(MAX_WAVEFORM_DISPLAY_GAIN)
+    return sanitized.map { (it * gain).coerceIn(0f, 1f) }
+}
+
 internal fun maximumWaveformBarCount(
     width: Float,
     minimumBarWidth: Float,
@@ -173,6 +199,9 @@ internal fun maximumWaveformBarCount(
         .toInt()
         .coerceAtLeast(1)
 }
+
+private const val WAVEFORM_DISPLAY_TARGET = 0.72f
+private const val MAX_WAVEFORM_DISPLAY_GAIN = 24f
 
 private fun List<Float>.sampledForDisplay(maxBars: Int): List<Float> {
     if (size <= maxBars) return this
@@ -272,6 +301,9 @@ fun TranscriptionProgress(
     phase: TranscriptionPhase,
     statusLabel: String,
     progress: Float?,
+    timingLabel: String? = null,
+    thermalStatusLabel: String? = null,
+    realTimeFactorLabel: String? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -294,6 +326,30 @@ fun TranscriptionProgress(
             Text(
                 text = statusLabel,
                 style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        timingLabel?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("transcription_timing"),
+            )
+        }
+        thermalStatusLabel?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("transcription_thermal_status"),
+            )
+        }
+        realTimeFactorLabel?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("transcription_real_time_factor"),
             )
         }
         if (phase != TranscriptionPhase.Complete) {

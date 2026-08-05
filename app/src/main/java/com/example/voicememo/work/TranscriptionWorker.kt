@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -25,6 +27,7 @@ import com.example.voicememo.data.TranscriptionPhase
 import com.example.voicememo.transcription.AudioChunkWindow
 import com.example.voicememo.transcription.GraniteRecordingMetadataGenerator
 import com.example.voicememo.transcription.LiteRtWhisperBackendFactory
+import com.example.voicememo.transcription.LiteRtFullGpuWhisperEngine
 import com.example.voicememo.transcription.LiteRtWhisperEngine
 import com.example.voicememo.transcription.LiteRtParakeetEngine
 import com.example.voicememo.transcription.LongFormChunk
@@ -35,11 +38,12 @@ import com.example.voicememo.transcription.WhisperBackendRequest
 import com.example.voicememo.transcription.WhisperBackendSelection
 import com.example.voicememo.transcription.WhisperCancelledException
 import com.example.voicememo.transcription.WhisperChunkResult
-import com.example.voicememo.transcription.WhisperEngine
+import com.example.voicememo.transcription.WhisperEngineCache
 import com.example.voicememo.transcription.WhisperEnginePoolLoader
 import com.example.voicememo.transcription.WhisperFeatureExtractor
 import com.example.voicememo.transcription.WhisperInferenceFingerprint
 import com.example.voicememo.transcription.WhisperLanguage
+import com.example.voicememo.transcription.WhisperAssets
 import com.example.voicememo.transcription.ParakeetInferenceFingerprint
 import com.example.voicememo.transcription.TranscriptionModel
 import com.example.voicememo.transcription.windowConfig
@@ -71,12 +75,29 @@ class TranscriptionWorker(
             KEY_GPU_ACCELERATION_ENABLED,
             BuildConfig.WHISPER_BACKEND_REQUESTED.equals("gpu", ignoreCase = true),
         )
+        val preTranscribedWindowsRequested =
+            inputData.getBoolean(KEY_USE_PRETRANSCRIBED_WINDOWS, false)
         var job = repository.getTranscriptionJob(jobId) ?: return Result.failure(
             failureData("UNKNOWN_JOB", "The transcription job no longer exists."),
         )
         val transcriptionModel = TranscriptionModel.fromId(job.transcriptionModelId)
         val memo = repository.getMemo(memoId) ?: return Result.failure(
             failureData("UNKNOWN_MEMO", "The voice memo no longer exists."),
+        )
+        val stagedPreTranscriptionDirectory = WhisperPreTranscriptionStorage.directory(
+            File(memo.audioPath).parentFile
+                ?: return Result.failure(
+                    failureData("INVALID_AUDIO", "Memo audio has no parent directory."),
+                ),
+        )
+        val usePreTranscribedWindows = shouldUsePreTranscribedWindows(
+            explicitlyRequested = preTranscribedWindowsRequested,
+            transcriptionModel = transcriptionModel,
+            firstStagedResultExists =
+                WhisperPreTranscriptionStorage.resultFile(
+                    stagedPreTranscriptionDirectory,
+                    index = 0,
+                ).isFile,
         )
         var benchmark: TranscriptionBenchmark? = null
 
@@ -93,13 +114,12 @@ class TranscriptionWorker(
             WhisperBackendRequest.fromGpuAccelerationEnabled(gpuAccelerationEnabled)
         val gpuDecoderMode =
             if (requestedBackend == WhisperBackendRequest.GPU) "gpu" else "disabled"
-        val workerCount = if (
-            transcriptionModel == TranscriptionModel.PARAKEET_TDT_0_6B_V3
-        ) {
-            1
-        } else {
-            BuildConfig.WHISPER_WORKER_COUNT
-        }
+        val workerCount = transcriptionWorkerCount(
+            transcriptionModel = transcriptionModel,
+            requestedBackend = requestedBackend,
+            usePreTranscribedWindows = usePreTranscribedWindows,
+            configuredCpuWorkerCount = BuildConfig.WHISPER_WORKER_COUNT,
+        )
         val inferenceFingerprint = when (transcriptionModel) {
             TranscriptionModel.WHISPER_LARGE_V3_TURBO ->
                 WhisperInferenceFingerprint.forConfiguration(
@@ -145,6 +165,24 @@ class TranscriptionWorker(
                     jobId = job.id,
                     inferenceFingerprint = inferenceFingerprint,
                 )
+                if (
+                    usePreTranscribedWindows &&
+                    transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO
+                ) {
+                    windows.forEach { window ->
+                        WhisperPreTranscriptionStorage.readResult(
+                            directory = stagedPreTranscriptionDirectory,
+                            index = window.index,
+                            expectedFingerprint = inferenceFingerprint,
+                        )?.let { result ->
+                            persistChunk(
+                                originalJob = job,
+                                memoId = memoId,
+                                chunk = LongFormChunk(window = window, result = result),
+                            )
+                        }
+                    }
+                }
                 val precompletedSegmentCount =
                     repository.completedTranscriptChunks(job.id).size.coerceAtMost(windows.size)
                 benchmark = TranscriptionBenchmark(
@@ -184,7 +222,7 @@ class TranscriptionWorker(
                     ?: WhisperLanguage.Auto
 
                 withContext(Dispatchers.Default) {
-                    val engines = mutableListOf<WhisperEngine>()
+                    var engineLease: WhisperEngineCache.Lease? = null
                     val voiceActivityDetector =
                         if (
                             voiceActivityDetectionEnabled &&
@@ -217,53 +255,71 @@ class TranscriptionWorker(
                                 WhisperBackendSelection.cpuRequested()
                             },
                         )
-                        engines += WhisperEnginePoolLoader.open(workerCount) {
-                            if (
-                                transcriptionModel ==
-                                TranscriptionModel.PARAKEET_TDT_0_6B_V3
+                        val cacheKey = WhisperEngineCache.Key(
+                            model = transcriptionModel,
+                            requestedBackend = requestedBackend,
+                            workerCount = workerCount,
+                            threadsPerWorker = BuildConfig.WHISPER_THREADS_PER_WORKER,
+                            timestampsEnabled = timestampsEnabled,
+                        )
+                        engineLease = container.whisperEngineCache.acquire(cacheKey) {
+                            var selectedBackend = if (
+                                requestedBackend == WhisperBackendRequest.GPU
                             ) {
-                                LiteRtParakeetEngine.open(
-                                    context = applicationContext,
-                                    backend = requestedBackend,
-                                ).also {
-                                    benchmark?.backendSelectionChanged(
-                                        if (
-                                            requestedBackend ==
-                                            WhisperBackendRequest.GPU
-                                        ) {
-                                            WhisperBackendSelection.gpuSelected(
+                                WhisperBackendSelection.pending(WhisperBackendRequest.GPU)
+                            } else {
+                                WhisperBackendSelection.cpuRequested()
+                            }
+                            val opened = WhisperEnginePoolLoader.open(workerCount) {
+                                if (
+                                    transcriptionModel ==
+                                    TranscriptionModel.PARAKEET_TDT_0_6B_V3
+                                ) {
+                                    LiteRtParakeetEngine.open(
+                                        context = applicationContext,
+                                        backend = requestedBackend,
+                                    ).also {
+                                        if (requestedBackend == WhisperBackendRequest.GPU) {
+                                            selectedBackend = WhisperBackendSelection.gpuSelected(
                                                 com.example.voicememo.transcription
                                                     .WhisperRuntimeBackend
                                                     .GPU_COMPILED_MODEL_AUTO,
                                             )
-                                        } else {
-                                            WhisperBackendSelection.cpuRequested()
-                                        },
+                                        }
+                                    }
+                                } else if (requestedBackend == WhisperBackendRequest.GPU) {
+                                    LiteRtWhisperBackendFactory
+                                        .openExperimentalGpuWithCpuFallback(
+                                            context = applicationContext,
+                                            cpuThreadCount =
+                                                BuildConfig.WHISPER_THREADS_PER_WORKER,
+                                            useFullGpuDecoder = true,
+                                            allowSourceQuantizedFcConvOps = false,
+                                            timestampsEnabled = timestampsEnabled,
+                                            onBackendSelectionChanged = { selection ->
+                                                selectedBackend = selection
+                                            },
+                                        )
+                                } else if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                                    LiteRtFullGpuWhisperEngine.openProductionSplit(
+                                        context = applicationContext,
+                                        cpuOnly = true,
+                                        timestampsEnabled = timestampsEnabled,
+                                    )
+                                } else {
+                                    LiteRtWhisperEngine.open(
+                                        context = applicationContext,
+                                        threadCount =
+                                            BuildConfig.WHISPER_THREADS_PER_WORKER,
+                                        timestampsEnabled = timestampsEnabled,
                                     )
                                 }
-                            } else if (requestedBackend == WhisperBackendRequest.GPU) {
-                                LiteRtWhisperBackendFactory
-                                    .openExperimentalGpuWithCpuFallback(
-                                        context = applicationContext,
-                                        cpuThreadCount =
-                                            BuildConfig.WHISPER_THREADS_PER_WORKER,
-                                        useFullGpuDecoder = true,
-                                        allowSourceQuantizedFcConvOps = false,
-                                        timestampsEnabled = timestampsEnabled,
-                                        onBackendSelectionChanged = { selection ->
-                                            benchmark?.backendSelectionChanged(selection)
-                                        },
-                                    )
-                            } else {
-                                LiteRtWhisperEngine.open(
-                                    context = applicationContext,
-                                    threadCount =
-                                        BuildConfig.WHISPER_THREADS_PER_WORKER,
-                                    timestampsEnabled = timestampsEnabled,
-                                )
                             }
+                            WhisperEngineCache.EngineSet(opened, selectedBackend)
                         }
+                        benchmark?.backendSelectionChanged(engineLease.backendSelection)
                         benchmark?.modelLoadingCompleted()
+                        val engines = engineLease.engines
                         val progressStateLock = Any()
                         val publishedTokens = IntArray(windows.size) { -1 }
                         val chunkProgress = FloatArray(windows.size)
@@ -271,6 +327,7 @@ class TranscriptionWorker(
                             if (index in chunkProgress.indices) chunkProgress[index] = 1f
                         }
                         benchmark?.transcriptionStarted()
+                        val transcriptionStartedAt = SystemClock.elapsedRealtime()
                         val result = LongFormTranscriber(
                             engines = engines,
                             voiceActivityDetector = voiceActivityDetector,
@@ -439,9 +496,23 @@ class TranscriptionWorker(
                             },
                         )
                         benchmark?.transcriptionCompleted(result)
+                        repository.getTranscriptionJob(job.id)?.let { current ->
+                            val thermalStatus = currentThermalStatus()
+                            job = updateJob(
+                                current.copy(
+                                    transcriptionElapsedMillis =
+                                        SystemClock.elapsedRealtime() - transcriptionStartedAt,
+                                    maximumThermalStatus = maximumThermalStatus(
+                                        current.maximumThermalStatus,
+                                        thermalStatus,
+                                    ),
+                                    updatedAtMillis = System.currentTimeMillis(),
+                                ),
+                            )
+                        }
                         result
                     } finally {
-                        engines.asReversed().forEach(WhisperEngine::close)
+                        engineLease?.close()
                         voiceActivityDetector?.close()
                     }
                 }
@@ -496,12 +567,18 @@ class TranscriptionWorker(
             return Result.success()
         } catch (cancelled: CancellationException) {
             benchmark?.finish(outcome = "CANCELLED", errorCode = "COROUTINE_CANCELLED")
-            withContext(NonCancellable) { cancelJob(job) }
+            withContext(NonCancellable) { recordInterruption(job) }
             throw cancelled
         } catch (cancelled: WhisperCancelledException) {
             benchmark?.finish(outcome = "CANCELLED", errorCode = "CANCELLED")
-            withContext(NonCancellable) { cancelJob(job) }
-            return Result.failure(failureData("CANCELLED", "Transcription was cancelled."))
+            val explicitlyCancelled = withContext(NonCancellable) {
+                recordInterruption(job)
+            }
+            return if (explicitlyCancelled) {
+                Result.failure(failureData("CANCELLED", "Transcription was cancelled."))
+            } else {
+                Result.retry()
+            }
         } catch (outOfMemory: OutOfMemoryError) {
             val message =
                 "The device could not allocate enough memory for local Whisper inference. " +
@@ -540,9 +617,11 @@ class TranscriptionWorker(
                 truncated = result.truncated,
                 warning = result.warnings.takeIf(List<String>::isNotEmpty)?.joinToString("\n"),
                 completedAtMillis = System.currentTimeMillis(),
+                inferenceMillis = result.inferenceMillis,
             ),
         )
         val persisted = repository.getTranscriptionJob(originalJob.id) ?: return
+        val thermalStatus = currentThermalStatus()
         repository.upsertTranscriptionJob(
             persisted.copy(
                 status = TranscriptionJobStatus.RUNNING,
@@ -550,6 +629,10 @@ class TranscriptionWorker(
                 completedChunks = maxOf(persisted.completedChunks, chunk.window.index + 1),
                 currentChunkIndex = null,
                 currentToken = 0,
+                maximumThermalStatus = maximumThermalStatus(
+                    persisted.maximumThermalStatus,
+                    thermalStatus,
+                ),
                 updatedAtMillis = System.currentTimeMillis(),
             ),
         )
@@ -583,6 +666,14 @@ class TranscriptionWorker(
             )
         }
     }
+
+    private fun currentThermalStatus(): Int? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            applicationContext.getSystemService(PowerManager::class.java)
+                ?.currentThermalStatus
+        } else {
+            null
+        }
 
     private fun TranscriptChunk.toLongFormChunk(): LongFormChunk {
         val startSample =
@@ -619,6 +710,32 @@ class TranscriptionWorker(
                 ),
             )
         }
+    }
+
+    /**
+     * WorkManager also cancels a running coroutine for resumable system stops
+     * such as device idle, thermal pressure, or process replacement. Only a
+     * cancellation explicitly requested through the app should become a
+     * terminal cancelled job.
+     *
+     * @return true when the user explicitly cancelled the job.
+     */
+    private suspend fun recordInterruption(job: TranscriptionJob): Boolean {
+        val current = repository.getTranscriptionJob(job.id) ?: return true
+        if (shouldMarkTranscriptionCancelled(current.status)) {
+            cancelJob(job)
+            return true
+        }
+        repository.upsertTranscriptionJob(
+            current.copy(
+                status = TranscriptionJobStatus.QUEUED,
+                phase = TranscriptionPhase.QUEUED,
+                currentChunkIndex = null,
+                currentToken = 0,
+                updatedAtMillis = System.currentTimeMillis(),
+            ),
+        )
+        return false
     }
 
     private suspend fun failJob(job: TranscriptionJob, code: String, message: String) {
@@ -684,6 +801,7 @@ class TranscriptionWorker(
         const val KEY_VAD_ENABLED = "vad_enabled"
         const val KEY_GPU_ACCELERATION_ENABLED = "gpu_acceleration_enabled"
         const val KEY_TRANSCRIPTION_MODEL_ID = "transcription_model_id"
+        const val KEY_USE_PRETRANSCRIBED_WINDOWS = "use_pretranscribed_windows"
         const val PROGRESS_CHUNK = "chunk"
         const val PROGRESS_TOTAL_CHUNKS = "total_chunks"
         const val PROGRESS_TOKEN = "token"
@@ -694,5 +812,44 @@ class TranscriptionWorker(
         private const val CHANNEL_ID = "local_transcription"
         private const val NOTIFICATION_ID = 1002
         private const val PROGRESS_TOKEN_STEP = 4
+    }
+}
+
+internal fun shouldMarkTranscriptionCancelled(status: TranscriptionJobStatus): Boolean =
+    status == TranscriptionJobStatus.CANCEL_REQUESTED ||
+        status == TranscriptionJobStatus.CANCELLED
+
+internal fun maximumThermalStatus(
+    previous: Int?,
+    current: Int?,
+): Int? = when {
+    previous == null -> current
+    current == null -> previous
+    else -> maxOf(previous, current)
+}
+
+internal fun shouldUsePreTranscribedWindows(
+    explicitlyRequested: Boolean,
+    transcriptionModel: TranscriptionModel,
+    firstStagedResultExists: Boolean,
+): Boolean =
+    transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO &&
+        (explicitlyRequested || firstStagedResultExists)
+
+internal fun transcriptionWorkerCount(
+    transcriptionModel: TranscriptionModel,
+    requestedBackend: WhisperBackendRequest,
+    usePreTranscribedWindows: Boolean,
+    configuredCpuWorkerCount: Int,
+): Int {
+    require(configuredCpuWorkerCount > 0)
+    return if (
+        requestedBackend == WhisperBackendRequest.GPU ||
+        transcriptionModel == TranscriptionModel.PARAKEET_TDT_0_6B_V3 ||
+        usePreTranscribedWindows
+    ) {
+        1
+    } else {
+        configuredCpuWorkerCount
     }
 }

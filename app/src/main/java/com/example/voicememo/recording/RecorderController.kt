@@ -50,6 +50,7 @@ sealed interface RecordingState {
         val durationMillis: Long,
         val sampleRate: Int,
         val createdAtEpochMillis: Long,
+        val preTranscriptionConfig: RecordingTranscriptionConfig? = null,
     ) : RecordingState
 
     data class Failed(
@@ -58,6 +59,12 @@ sealed interface RecordingState {
         val recoverableAudioPath: String? = null,
     ) : RecordingState
 }
+
+data class RecordingTranscriptionConfig(
+    val timestampsEnabled: Boolean,
+    val voiceActivityDetectionEnabled: Boolean,
+    val gpuAccelerationEnabled: Boolean,
+)
 
 internal object RecordingRuntime {
     val state = kotlinx.coroutines.flow.MutableStateFlow<RecordingState>(RecordingState.Idle)

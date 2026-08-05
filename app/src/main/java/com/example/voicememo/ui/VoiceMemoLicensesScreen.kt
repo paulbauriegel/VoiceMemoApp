@@ -64,6 +64,8 @@ fun VoiceMemoLicensesScreen(
     transcriptionTimestampsEnabled: Boolean = false,
     voiceActivityDetectionEnabled: Boolean = true,
     gpuAccelerationEnabled: Boolean = true,
+    transcribeWhileRecordingEnabled: Boolean = false,
+    transcriptionTimingEnabled: Boolean = false,
     transcriptionModelId: String = "whisper-large-v3-turbo",
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
@@ -231,6 +233,22 @@ fun VoiceMemoLicensesScreen(
                 )
             }
 
+            item(key = "transcribe-while-recording") {
+                TranscriptionToggleSettingsCard(
+                    headline = "Transcribe while recording",
+                    supportingText =
+                        "Start Whisper on completed audio windows while recording. " +
+                            "Only one memo transcribes at a time; later recordings wait safely.",
+                    enabled = transcribeWhileRecordingEnabled,
+                    testTag = "settings_transcribe_while_recording",
+                    onEnabledChange = { enabled ->
+                        onAction(
+                            VoiceMemoUiAction.TranscribeWhileRecordingChanged(enabled),
+                        )
+                    },
+                )
+            }
+
             item(key = "whisper-timestamps") {
                 TranscriptionToggleSettingsCard(
                     headline = "Whisper timestamps",
@@ -243,6 +261,21 @@ fun VoiceMemoLicensesScreen(
                         onAction(
                             VoiceMemoUiAction.TranscriptionTimestampsChanged(enabled),
                         )
+                    },
+                )
+            }
+
+            item(key = "transcription-timing") {
+                TranscriptionToggleSettingsCard(
+                    headline = "Show transcription timing",
+                    supportingText =
+                        "Show the average time per completed segment while transcribing " +
+                            "with device thermal status, then retain the total time and " +
+                            "peak thermal status with RTF when it finishes.",
+                    enabled = transcriptionTimingEnabled,
+                    testTag = "settings_transcription_timing",
+                    onEnabledChange = { enabled ->
+                        onAction(VoiceMemoUiAction.TranscriptionTimingChanged(enabled))
                     },
                 )
             }

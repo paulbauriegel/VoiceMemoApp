@@ -60,6 +60,9 @@ class WhisperModelContractException(message: String) : IllegalStateException(mes
 object WhisperAssets {
     const val ROOT = "whisper"
     val MODEL: String = BuildConfig.WHISPER_MODEL_ASSET_PATH
+    val SPLIT_MODEL_PRODUCTION: Boolean = BuildConfig.WHISPER_SPLIT_MODEL_PRODUCTION
+    val ENCODER_MODEL: String = BuildConfig.WHISPER_ENCODER_MODEL_ASSET_PATH
+    val DECODER_MODEL: String = BuildConfig.WHISPER_DECODER_MODEL_ASSET_PATH
     const val TOKENIZER = "$ROOT/tokenizer.json"
     const val GENERATION_CONFIG = "$ROOT/generation_config.json"
     const val PREPROCESSOR_CONFIG = "$ROOT/preprocessor_config.json"
@@ -68,4 +71,8 @@ object WhisperAssets {
     const val TOKENIZER_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
     val MODEL_SIZE_BYTES: Long = BuildConfig.WHISPER_MODEL_SIZE_BYTES
     val MODEL_SHA256: String = BuildConfig.WHISPER_MODEL_SHA256
+    val ENCODER_MODEL_SIZE_BYTES: Long = BuildConfig.WHISPER_ENCODER_MODEL_SIZE_BYTES
+    val ENCODER_MODEL_SHA256: String = BuildConfig.WHISPER_ENCODER_MODEL_SHA256
+    val DECODER_MODEL_SIZE_BYTES: Long = BuildConfig.WHISPER_DECODER_MODEL_SIZE_BYTES
+    val DECODER_MODEL_SHA256: String = BuildConfig.WHISPER_DECODER_MODEL_SHA256
 }

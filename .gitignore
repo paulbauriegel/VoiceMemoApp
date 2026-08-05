@@ -23,5 +23,16 @@ app/schemas/*.tmp
 # Timestamped on-device performance reports collected by the developer tools.
 benchmark-results/
 
+# Large/private controlled-suite inputs live outside build/ so Gradle clean
+# cannot remove them. The manifest and recovery instructions remain tracked.
+benchmark-inputs/whisper-suite/*
+!benchmark-inputs/whisper-suite/.gitignore
+!benchmark-inputs/whisper-suite/README.md
+!benchmark-inputs/whisper-suite/manifest.json
+
 scripts/__pycache__/
 scripts/tests/__pycache__/
+blog
+model-assets
+repro
+benchmark-inputs

@@ -666,6 +666,9 @@ private fun TranscriptDetails(
                     phase = transcript.phase,
                     statusLabel = transcript.statusLabel,
                     progress = transcript.progress,
+                    timingLabel = transcript.timingLabel,
+                    thermalStatusLabel = transcript.thermalStatusLabel,
+                    realTimeFactorLabel = transcript.realTimeFactorLabel,
                 )
                 OutlinedButton(
                     onClick = { onAction(VoiceMemoUiAction.CancelTranscription) },
@@ -722,6 +725,9 @@ private fun TranscriptDetails(
                     phase = transcript.phase,
                     statusLabel = transcript.statusLabel,
                     progress = 1f,
+                    timingLabel = transcript.timingLabel,
+                    thermalStatusLabel = transcript.thermalStatusLabel,
+                    realTimeFactorLabel = transcript.realTimeFactorLabel,
                 )
                 if (transcript.isEditing) {
                     OutlinedTextField(

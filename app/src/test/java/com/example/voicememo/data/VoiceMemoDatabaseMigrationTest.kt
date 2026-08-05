@@ -161,6 +161,54 @@ class VoiceMemoDatabaseMigrationTest {
         assertFalse(normalizedSql.contains("DELETE "))
     }
 
+    @Test
+    fun migrationSevenToEightAddsNullableTimingWithoutDeletingData() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_7_8.migrate(database)
+
+        assertEquals(2, executedSql.size)
+        val normalizedSql = executedSql.joinToString("\n").uppercase()
+        assertTrue(normalizedSql.contains("ADD COLUMN `TRANSCRIPTIONELAPSEDMILLIS` INTEGER"))
+        assertTrue(normalizedSql.contains("ADD COLUMN `INFERENCEMILLIS` INTEGER"))
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+        assertFalse(normalizedSql.contains("NOT NULL"))
+    }
+
+    @Test
+    fun migrationEightToNineAddsNullableThermalStatusWithoutDeletingData() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_8_9.migrate(database)
+
+        assertEquals(
+            listOf(
+                "ALTER TABLE `transcription_jobs` " +
+                    "ADD COLUMN `maximumThermalStatus` INTEGER",
+            ),
+            executedSql,
+        )
+        val normalizedSql = executedSql.single().uppercase()
+        assertFalse(normalizedSql.contains("DROP "))
+        assertFalse(normalizedSql.contains("DELETE "))
+        assertFalse(normalizedSql.contains("NOT NULL"))
+    }
+
     private fun defaultValue(type: Class<*>): Any? = when (type) {
         java.lang.Boolean.TYPE -> false
         java.lang.Byte.TYPE -> 0.toByte()

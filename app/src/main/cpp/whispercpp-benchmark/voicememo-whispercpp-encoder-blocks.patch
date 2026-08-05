@@ -1,0 +1,157 @@
+diff --git a/include/whisper.h b/include/whisper.h
+--- a/include/whisper.h
++++ b/include/whisper.h
+@@ -328,5 +328,14 @@ extern "C" {
+                            float * output,
+                              int   n_elements);
++    WHISPER_API void whisper_enable_encoder_block_diagnostics(
++            struct whisper_context * ctx,
++                              bool   enabled);
++    WHISPER_API int whisper_encoder_block_diagnostic_count(struct whisper_context * ctx);
++    WHISPER_API int whisper_copy_encoder_block_diagnostic(
++            struct whisper_context * ctx,
++                              int   index,
++                           float * output,
++                              int   n_elements);
+ 
+     // Run the Whisper decoder to obtain the logits and probabilities for the next token.
+     // Make sure to call whisper_encode() first.
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -877,6 +877,9 @@ struct whisper_state {
+     // result of the encoder
+     struct ggml_tensor * embd_conv = nullptr;
+     struct ggml_tensor * embd_enc  = nullptr;
++    bool encoder_block_diagnostics_enabled = false;
++    std::vector<struct ggml_tensor *> encoder_block_diagnostics;
++    std::vector<std::vector<float>> encoder_block_diagnostic_values;
+ 
+     // helpers for GPU offloading
+     std::vector<float> inp_mel;
+@@ -2092,6 +2095,12 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+ 
+     struct ggml_tensor * inpL = cur;
+ 
++    wstate.encoder_block_diagnostics.clear();
++    wstate.encoder_block_diagnostic_values.clear();
++    if (wstate.encoder_block_diagnostics_enabled) {
++        wstate.encoder_block_diagnostics.push_back(inpL);
++    }
++
+     for (int il = 0; il < n_layer; ++il) {
+         const auto & layer = model.layers_encoder[il];
+ 
+@@ -2234,6 +2243,12 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+         }
+ 
+         inpL = ggml_add(ctx0, cur, inpFF);
++        if (
++            wstate.encoder_block_diagnostics_enabled &&
++            (il == 0 || il == 3 || il == 7 || il == 15 || il >= 23)
++        ) {
++            wstate.encoder_block_diagnostics.push_back(inpL);
++        }
+     }
+ 
+     cur = inpL;
+@@ -2345,6 +2360,37 @@ static struct ggml_cgraph * whisper_build_graph_cross(
+     return gf;
+ }
+ 
++static bool whisper_encoder_block_diagnostic_callback(
++        struct ggml_tensor * tensor,
++                         bool ask,
++                       void * user_data) {
++    auto * state = static_cast<whisper_state *>(user_data);
++    const auto found = std::find(
++        state->encoder_block_diagnostics.begin(),
++        state->encoder_block_diagnostics.end(),
++        tensor
++    );
++    if (found == state->encoder_block_diagnostics.end()) {
++        return !ask;
++    }
++    if (ask) {
++        return true;
++    }
++    const size_t index = static_cast<size_t>(
++        std::distance(state->encoder_block_diagnostics.begin(), found)
++    );
++    if (tensor->type != GGML_TYPE_F32) {
++        return false;
++    }
++    if (state->encoder_block_diagnostic_values.size() != state->encoder_block_diagnostics.size()) {
++        state->encoder_block_diagnostic_values.resize(state->encoder_block_diagnostics.size());
++    }
++    auto & values = state->encoder_block_diagnostic_values[index];
++    values.resize(static_cast<size_t>(ggml_nelements(tensor)));
++    ggml_backend_tensor_get(tensor, values.data(), 0, ggml_nbytes(tensor));
++    return true;
++}
++
+ // evaluate the encoder with the given state
+ //
+ // given audio recording (more specifically, its log mel spectrogram), runs forward pass of the encoder
+@@ -2432,7 +2478,16 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
+-        if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
++        if (wstate.encoder_block_diagnostics_enabled) {
++            ggml_backend_sched_set_eval_callback(
++                sched,
++                whisper_encoder_block_diagnostic_callback,
++                &wstate
++            );
++        }
++        const bool encoded = ggml_graph_compute_helper(sched, gf, n_threads);
++        ggml_backend_sched_set_eval_callback(sched, nullptr, nullptr);
++        if (!encoded) {
+             return false;
+         }
+     }
+@@ -3989,6 +4044,43 @@ int whisper_copy_encoder_state(
+     return 0;
+ }
+ 
++void whisper_enable_encoder_block_diagnostics(
++        struct whisper_context * ctx,
++                          bool   enabled) {
++    if (ctx == nullptr || ctx->state == nullptr) {
++        return;
++    }
++    ctx->state->encoder_block_diagnostics_enabled = enabled;
++    ctx->state->encoder_block_diagnostics.clear();
++    ctx->state->encoder_block_diagnostic_values.clear();
++}
++
++int whisper_encoder_block_diagnostic_count(struct whisper_context * ctx) {
++    if (ctx == nullptr || ctx->state == nullptr) {
++        return -1;
++    }
++    return static_cast<int>(ctx->state->encoder_block_diagnostic_values.size());
++}
++
++int whisper_copy_encoder_block_diagnostic(
++        struct whisper_context * ctx,
++                          int   index,
++                       float * output,
++                          int   n_elements) {
++    if (
++        ctx == nullptr || ctx->state == nullptr || output == nullptr || index < 0 ||
++        index >= static_cast<int>(ctx->state->encoder_block_diagnostic_values.size())
++    ) {
++        return -1;
++    }
++    const auto & values = ctx->state->encoder_block_diagnostic_values[index];
++    if (n_elements != static_cast<int>(values.size())) {
++        return -2;
++    }
++    memcpy(output, values.data(), values.size() * sizeof(float));
++    return 0;
++}
++
+ int whisper_decode_with_state(struct whisper_context * ctx, struct whisper_state * state, const whisper_token * tokens, int n_tokens, int n_past, int n_threads) {
+     whisper_batch_prep_legacy(state->batch, tokens, n_tokens, n_past, 0);
+ 

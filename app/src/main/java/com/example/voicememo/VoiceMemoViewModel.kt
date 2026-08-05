@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -98,6 +99,10 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled =
                 container.transcriptionPreferences.gpuAccelerationEnabled,
+            transcribeWhileRecordingEnabled =
+                container.transcriptionPreferences.transcribeWhileRecordingEnabled,
+            transcriptionTimingEnabled =
+                container.transcriptionPreferences.transcriptionTimingEnabled,
             transcriptionModelId =
                 container.transcriptionPreferences.transcriptionModelId,
         ),
@@ -286,6 +291,8 @@ class VoiceMemoViewModel(
             transcriptionTimestampsEnabled = local.transcriptionTimestampsEnabled,
             voiceActivityDetectionEnabled = local.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled = local.gpuAccelerationEnabled,
+            transcribeWhileRecordingEnabled = local.transcribeWhileRecordingEnabled,
+            transcriptionTimingEnabled = local.transcriptionTimingEnabled,
             transcriptionModelId = local.transcriptionModelId,
             recorder = recorder.toUi(),
             detail = memoDetail?.toUi(playback, local),
@@ -310,6 +317,10 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.voiceActivityDetectionEnabled,
             gpuAccelerationEnabled =
                 container.transcriptionPreferences.gpuAccelerationEnabled,
+            transcribeWhileRecordingEnabled =
+                container.transcriptionPreferences.transcribeWhileRecordingEnabled,
+            transcriptionTimingEnabled =
+                container.transcriptionPreferences.transcriptionTimingEnabled,
             transcriptionModelId =
                 container.transcriptionPreferences.transcriptionModelId,
         ),
@@ -613,6 +624,21 @@ class VoiceMemoViewModel(
                     action.enabled
                 presentation.update {
                     it.copy(gpuAccelerationEnabled = action.enabled)
+                }
+            }
+
+            is VoiceMemoUiAction.TranscribeWhileRecordingChanged -> {
+                container.transcriptionPreferences.transcribeWhileRecordingEnabled =
+                    action.enabled
+                presentation.update {
+                    it.copy(transcribeWhileRecordingEnabled = action.enabled)
+                }
+            }
+
+            is VoiceMemoUiAction.TranscriptionTimingChanged -> {
+                container.transcriptionPreferences.transcriptionTimingEnabled = action.enabled
+                presentation.update {
+                    it.copy(transcriptionTimingEnabled = action.enabled)
                 }
             }
 
@@ -1245,6 +1271,23 @@ class VoiceMemoViewModel(
             effectiveTranscript
         }
         val transcriptState = transcriptionDetail(latestJob, displayTranscript)
+        val timingLabel = transcriptionTimingLabel(
+            enabled = local.transcriptionTimingEnabled,
+            phase = transcriptState.phase,
+            transcriptionElapsedMillis = latestJob?.transcriptionElapsedMillis,
+            segmentInferenceMillis = chunks.mapNotNull(TranscriptChunk::inferenceMillis),
+        )
+        val thermalStatusLabel = transcriptionThermalStatusLabel(
+            enabled = local.transcriptionTimingEnabled,
+            phase = transcriptState.phase,
+            maximumThermalStatus = latestJob?.maximumThermalStatus,
+        )
+        val realTimeFactorLabel = transcriptionRealTimeFactorLabel(
+            enabled = local.transcriptionTimingEnabled,
+            phase = transcriptState.phase,
+            transcriptionElapsedMillis = latestJob?.transcriptionElapsedMillis,
+            audioDurationMillis = memo.durationMillis,
+        )
         return VoiceMemoDetailUi(
             id = memo.id,
             title = memo.title,
@@ -1280,6 +1323,9 @@ class VoiceMemoViewModel(
                 isEditing = local.transcriptEditing,
                 selectedLanguageCode = memo.languageOverride ?: "auto",
                 isEdited = transcript?.editedText != null,
+                timingLabel = timingLabel,
+                thermalStatusLabel = thermalStatusLabel,
+                realTimeFactorLabel = realTimeFactorLabel,
                 segments = if (transcript?.editedText == null) {
                     chunks
                         .filter { it.rawText.isNotBlank() }
@@ -1424,8 +1470,17 @@ class VoiceMemoViewModel(
             )
         }
         return runCatching {
-            app.assets.openFd(WhisperAssets.MODEL).use { descriptor ->
-                check(descriptor.declaredLength == WhisperAssets.MODEL_SIZE_BYTES)
+            if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                app.assets.openFd(WhisperAssets.ENCODER_MODEL).use { descriptor ->
+                    check(descriptor.declaredLength == WhisperAssets.ENCODER_MODEL_SIZE_BYTES)
+                }
+                app.assets.openFd(WhisperAssets.DECODER_MODEL).use { descriptor ->
+                    check(descriptor.declaredLength == WhisperAssets.DECODER_MODEL_SIZE_BYTES)
+                }
+            } else {
+                app.assets.openFd(WhisperAssets.MODEL).use { descriptor ->
+                    check(descriptor.declaredLength == WhisperAssets.MODEL_SIZE_BYTES)
+                }
             }
             app.assets.openFd(ParakeetAssets.MODEL).use { descriptor ->
                 check(descriptor.declaredLength == ParakeetAssets.MODEL_SIZE_BYTES)
@@ -1505,6 +1560,8 @@ class VoiceMemoViewModel(
         val transcriptionTimestampsEnabled: Boolean = false,
         val voiceActivityDetectionEnabled: Boolean = true,
         val gpuAccelerationEnabled: Boolean = true,
+        val transcribeWhileRecordingEnabled: Boolean = false,
+        val transcriptionTimingEnabled: Boolean = false,
         val transcriptionModelId: String = "whisper-large-v3-turbo",
     ) {
         fun isBackupBusy(): Boolean =
@@ -1615,6 +1672,86 @@ class VoiceMemoViewModel(
 internal fun TranscriptionJob?.isGeneratingRecordingMetadata(): Boolean =
     this?.status == TranscriptionJobStatus.RUNNING &&
         phase == com.example.voicememo.data.TranscriptionPhase.GENERATING_METADATA
+
+internal fun transcriptionTimingLabel(
+    enabled: Boolean,
+    phase: TranscriptionPhase,
+    transcriptionElapsedMillis: Long?,
+    segmentInferenceMillis: List<Long>,
+): String? {
+    if (!enabled) return null
+    val completedSegmentTimings = segmentInferenceMillis.filter { it >= 0L }
+    return when (phase) {
+        TranscriptionPhase.Transcribing,
+        TranscriptionPhase.Finalizing,
+        -> completedSegmentTimings
+            .takeIf(List<Long>::isNotEmpty)
+            ?.average()
+            ?.let { average ->
+                "Average per segment ${formatTimingMillis(average)}"
+            }
+
+        TranscriptionPhase.Complete -> {
+            val elapsed = transcriptionElapsedMillis
+                ?: completedSegmentTimings.sum().takeIf { completedSegmentTimings.isNotEmpty() }
+            elapsed?.let { "Transcription time ${formatTimingMillis(it.toDouble())}" }
+        }
+
+        else -> null
+    }
+}
+
+internal fun formatTimingMillis(millis: Double): String {
+    val safeMillis = millis.coerceAtLeast(0.0)
+    val totalSeconds = safeMillis / 1_000.0
+    if (totalSeconds < 60.0) return String.format(Locale.US, "%.1f s", totalSeconds)
+    val minutes = totalSeconds.toLong() / 60L
+    val seconds = totalSeconds - minutes * 60L
+    return String.format(Locale.US, "%dm %.1fs", minutes, seconds)
+}
+
+internal fun transcriptionThermalStatusLabel(
+    enabled: Boolean,
+    phase: TranscriptionPhase,
+    maximumThermalStatus: Int?,
+): String? {
+    if (!enabled || maximumThermalStatus == null) return null
+    val status = when (maximumThermalStatus) {
+        PowerManager.THERMAL_STATUS_NONE -> "No throttling"
+        PowerManager.THERMAL_STATUS_LIGHT -> "Light"
+        PowerManager.THERMAL_STATUS_MODERATE -> "Moderate"
+        PowerManager.THERMAL_STATUS_SEVERE -> "Severe"
+        PowerManager.THERMAL_STATUS_CRITICAL -> "Critical"
+        PowerManager.THERMAL_STATUS_EMERGENCY -> "Emergency"
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> "Shutdown"
+        else -> return null
+    }
+    return when (phase) {
+        TranscriptionPhase.Transcribing,
+        TranscriptionPhase.Finalizing,
+        -> "Thermal status: $status"
+        TranscriptionPhase.Complete -> "Peak thermal status: $status"
+        else -> null
+    }
+}
+
+internal fun transcriptionRealTimeFactorLabel(
+    enabled: Boolean,
+    phase: TranscriptionPhase,
+    transcriptionElapsedMillis: Long?,
+    audioDurationMillis: Long,
+): String? {
+    if (
+        !enabled ||
+        phase != TranscriptionPhase.Complete ||
+        transcriptionElapsedMillis == null ||
+        audioDurationMillis <= 0L
+    ) {
+        return null
+    }
+    val factor = transcriptionElapsedMillis.toDouble() / audioDurationMillis
+    return String.format(Locale.US, "RTF %.3f", factor)
+}
 
 internal fun backupFileName(nowMillis: Long): String =
     "Voice-Memo-backup-" +

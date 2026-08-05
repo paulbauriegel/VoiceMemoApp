@@ -225,7 +225,7 @@ class RoomMemoRepository(
         require(newMemo.title.isNotBlank()) { "Memo title must not be blank." }
         require(newMemo.durationMillis >= 0) { "Memo duration must not be negative." }
         val memo = MemoRecord(
-            id = UUID.randomUUID().toString(),
+            id = newMemo.id ?: UUID.randomUUID().toString(),
             title = newMemo.title.trim(),
             createdAtMillis = newMemo.createdAtMillis,
             updatedAtMillis = newMemo.createdAtMillis,

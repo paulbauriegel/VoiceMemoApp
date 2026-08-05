@@ -21,7 +21,9 @@ struct BenchmarkEngine {
     std::string language = "und";
     std::vector<whisper_token> tokens;
     int64_t inference_millis = 0;
+    int64_t encoder_millis = 0;
     std::string backend = "cpu";
+    bool timestamp_tokens_enabled = false;
 };
 
 struct InitLog {
@@ -127,7 +129,8 @@ Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_create(
     jclass,
     jstring model_path,
     jint threads,
-    jboolean use_vulkan
+    jboolean use_vulkan,
+    jboolean timestamp_tokens_enabled
 ) {
     if (threads < 1 || threads > 8) {
         throw_illegal_state(env, "whisper.cpp benchmark threads must be between 1 and 8.");
@@ -178,6 +181,7 @@ Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_create(
     engine->threads = threads;
     engine->backend =
         requested_vulkan ? "vulkan:" + vulkan_device : "cpu";
+    engine->timestamp_tokens_enabled = timestamp_tokens_enabled == JNI_TRUE;
     return reinterpret_cast<jlong>(engine);
 }
 
@@ -225,7 +229,7 @@ Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_transcribe(
     params.n_threads = engine->threads;
     params.translate = false;
     params.no_context = true;
-    params.no_timestamps = true;
+    params.no_timestamps = !engine->timestamp_tokens_enabled;
     params.single_segment = false;
     params.print_special = false;
     params.print_progress = false;
@@ -271,6 +275,7 @@ Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_transcribe(
     }
 
     const whisper_token end_of_text = whisper_token_eot(engine->context);
+    const whisper_token timestamp_begin = whisper_token_beg(engine->context);
     const int segment_count = whisper_full_n_segments(engine->context);
     for (int segment = 0; segment < segment_count; ++segment) {
         const char * segment_text =
@@ -282,11 +287,143 @@ Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_transcribe(
         for (int token_index = 0; token_index < token_count; ++token_index) {
             const whisper_token token =
                 whisper_full_get_token_id(engine->context, segment, token_index);
-            if (token >= 0 && token < end_of_text) {
+            if (
+                token >= 0 &&
+                (
+                    token < end_of_text ||
+                    (engine->timestamp_tokens_enabled && token >= timestamp_begin)
+                )
+            ) {
                 engine->tokens.push_back(token);
             }
         }
     }
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_encodeMel(
+    JNIEnv * env,
+    jclass,
+    jlong handle,
+    jfloatArray mel,
+    jint frame_count,
+    jint mel_bin_count
+) {
+    BenchmarkEngine * engine = require_engine(env, handle);
+    if (engine == nullptr || env->ExceptionCheck()) {
+        return nullptr;
+    }
+    if (mel == nullptr || frame_count <= 0 || mel_bin_count <= 0) {
+        throw_illegal_state(env, "whisper.cpp encoder diagnostic mel input is invalid.");
+        return nullptr;
+    }
+    const jsize value_count = env->GetArrayLength(mel);
+    if (value_count != frame_count * mel_bin_count) {
+        throw_illegal_state(env, "whisper.cpp encoder diagnostic mel shape is invalid.");
+        return nullptr;
+    }
+    std::vector<float> values(static_cast<size_t>(value_count));
+    env->GetFloatArrayRegion(mel, 0, value_count, values.data());
+    if (env->ExceptionCheck()) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> guard(engine->mutex);
+    whisper_enable_encoder_block_diagnostics(engine->context, true);
+    if (whisper_set_mel(engine->context, values.data(), frame_count, mel_bin_count) != 0) {
+        throw_illegal_state(env, "whisper.cpp rejected the shared mel tensor.");
+        return nullptr;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    if (whisper_encode(engine->context, 0, engine->threads) != 0) {
+        throw_illegal_state(env, "whisper.cpp encoder diagnostic failed.");
+        return nullptr;
+    }
+    const auto finished = std::chrono::steady_clock::now();
+    engine->encoder_millis =
+        std::chrono::duration_cast<std::chrono::milliseconds>(finished - started).count();
+
+    const int element_count = whisper_encoder_state_n_elements(engine->context);
+    const int context_count = whisper_encoder_state_n_ctx(engine->context);
+    const int state_count = whisper_encoder_state_n_state(engine->context);
+    if (element_count <= 0 || context_count * state_count != element_count) {
+        throw_illegal_state(env, "whisper.cpp returned an invalid encoder-state shape.");
+        return nullptr;
+    }
+    std::vector<float> encoder_state(static_cast<size_t>(element_count));
+    if (whisper_copy_encoder_state(
+            engine->context,
+            encoder_state.data(),
+            element_count) != 0) {
+        throw_illegal_state(env, "whisper.cpp could not copy its final FP32 encoder state.");
+        return nullptr;
+    }
+    jfloatArray result = env->NewFloatArray(element_count);
+    if (result != nullptr) {
+        env->SetFloatArrayRegion(result, 0, element_count, encoder_state.data());
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_getEncoderBlockCount(
+    JNIEnv * env,
+    jclass,
+    jlong handle
+) {
+    BenchmarkEngine * engine = require_engine(env, handle);
+    if (engine == nullptr || env->ExceptionCheck()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(engine->mutex);
+    return whisper_encoder_block_diagnostic_count(engine->context);
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_getEncoderBlockState(
+    JNIEnv * env,
+    jclass,
+    jlong handle,
+    jint index
+) {
+    BenchmarkEngine * engine = require_engine(env, handle);
+    if (engine == nullptr || env->ExceptionCheck()) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> guard(engine->mutex);
+    const int element_count = whisper_encoder_state_n_elements(engine->context);
+    if (element_count <= 0) {
+        throw_illegal_state(env, "whisper.cpp encoder block shape is unavailable.");
+        return nullptr;
+    }
+    std::vector<float> state(static_cast<size_t>(element_count));
+    if (whisper_copy_encoder_block_diagnostic(
+            engine->context,
+            index,
+            state.data(),
+            element_count) != 0) {
+        throw_illegal_state(env, "whisper.cpp encoder block copy failed.");
+        return nullptr;
+    }
+    jfloatArray result = env->NewFloatArray(element_count);
+    if (result != nullptr) {
+        env->SetFloatArrayRegion(result, 0, element_count, state.data());
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_voicememo_transcription_WhisperCppBenchmarkNative_getEncoderMillis(
+    JNIEnv * env,
+    jclass,
+    jlong handle
+) {
+    BenchmarkEngine * engine = require_engine(env, handle);
+    if (engine == nullptr || env->ExceptionCheck()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(engine->mutex);
+    return engine->encoder_millis;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

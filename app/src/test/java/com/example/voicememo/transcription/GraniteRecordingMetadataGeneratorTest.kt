@@ -46,6 +46,45 @@ class GraniteRecordingMetadataGeneratorTest {
     }
 
     @Test
+    fun parsesAnswerAfterEchoedPromptWithoutUsingPromptInstructions() {
+        val echoedPrompt = metadataPrompt("The team agrees on the release scope.")
+
+        val metadata = parseRecordingMetadata(
+            """
+            $echoedPrompt
+            TITLE: Release Planning
+            SUMMARY: The team agrees on the release scope and assigns the remaining work.
+            """.trimIndent(),
+        )
+
+        assertEquals("Release Planning", metadata?.title)
+        assertEquals(
+            "The team agrees on the release scope and assigns the remaining work.",
+            metadata?.summary,
+        )
+    }
+
+    @Test
+    fun rejectsEchoedPromptWithoutMetadataAnswer() {
+        assertEquals(
+            null,
+            parseRecordingMetadata(metadataPrompt("Thank you.")),
+        )
+    }
+
+    @Test
+    fun rejectsPromptInstructionsRepeatedAsTheAnswer() {
+        val metadata = parseRecordingMetadata(
+            """
+            TITLE: 3 to 8 words, specific, no ending punctuation
+            SUMMARY: exactly one short sentence, at most 24 words.
+            """.trimIndent(),
+        )
+
+        assertEquals(null, metadata)
+    }
+
+    @Test
     fun excerptSamplesBeginningMiddleAndEndWithinBudget() {
         val transcript = buildString {
             repeat(80) { append("begin$it ") }
@@ -69,6 +108,7 @@ class GraniteRecordingMetadataGeneratorTest {
         assertNotNull(prompt)
         assertTrue(prompt.contains("same language"))
         assertTrue(prompt.contains("at most 24 words"))
-        assertTrue(prompt.endsWith("Wir besprechen den Projektplan."))
+        assertTrue(prompt.contains("TRANSCRIPT:\nWir besprechen den Projektplan."))
+        assertTrue(prompt.endsWith("METADATA ANSWER:"))
     }
 }

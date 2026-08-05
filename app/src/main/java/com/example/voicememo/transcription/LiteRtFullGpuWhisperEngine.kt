@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transcription never calls it, so divergent probe output cannot be persisted.
  */
 internal class LiteRtFullGpuWhisperEngine private constructor(
-    private val model: CompiledModel,
+    private val encoderModel: CompiledModel,
+    private val decoderModel: CompiledModel,
     private val tokenizer: WhisperTokenizer,
     private val generationConfig: WhisperGenerationConfig,
     private val buffers: InferenceBuffers,
@@ -119,7 +120,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             buffers.tokens.writeInt(tokenInput)
         }
         tracedGpu("WhisperGpuTeacherForcedDecodeStep", "teacher-forced decoder invocation") {
-            model.run(
+            decoderModel.run(
                 mapOf(
                     DECODE_ENCODER_STATE to buffers.decoderEncoderState,
                     DECODE_TOKENS to buffers.tokens,
@@ -187,7 +188,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 buffers.tokens.writeInt(tokenInput)
             }
             tracedGpu("WhisperGpuSpeculativeDecodeStep", "speculative decoder invocation") {
-                model.run(
+                decoderModel.run(
                     mapOf(
                         DECODE_ENCODER_STATE to buffers.decoderEncoderState,
                         DECODE_TOKENS to buffers.tokens,
@@ -237,7 +238,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
         }
         checkCancellation(shouldCancel)
         tracedGpu("WhisperGpuEncode", "encoder invocation") {
-            model.run(
+            encoderModel.run(
                 mapOf(ENCODE_INPUT to buffers.features),
                 mapOf(ENCODE_OUTPUT to buffers.encoderState),
                 ENCODE_SIGNATURE,
@@ -300,7 +301,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 buffers.tokens.writeInt(tokenInput)
             }
             tracedGpu("WhisperGpuDecodeStep", "decoder invocation") {
-                model.run(
+                decoderModel.run(
                     mapOf(
                         DECODE_ENCODER_STATE to buffers.decoderEncoderState,
                         DECODE_TOKENS to buffers.tokens,
@@ -389,7 +390,10 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
         if (!closed.compareAndSet(false, true)) return
         synchronized(inferenceLock) {
             buffers.close()
-            model.close()
+            runCatching(decoderModel::close)
+            if (encoderModel !== decoderModel) {
+                runCatching(encoderModel::close)
+            }
         }
     }
 
@@ -517,12 +521,21 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
         }
 
         companion object {
-            fun allocate(model: CompiledModel): InferenceBuffers {
+            fun allocate(
+                encoderModel: CompiledModel,
+                decoderModel: CompiledModel,
+            ): InferenceBuffers {
                 val allocated = mutableListOf<TensorBuffer>()
-                fun input(name: String, signature: String): TensorBuffer =
-                    model.createInputBuffer(name, signature).also(allocated::add)
-                fun output(name: String, signature: String): TensorBuffer =
-                    model.createOutputBuffer(name, signature).also(allocated::add)
+                fun input(
+                    model: CompiledModel,
+                    name: String,
+                    signature: String,
+                ): TensorBuffer = model.createInputBuffer(name, signature).also(allocated::add)
+                fun output(
+                    model: CompiledModel,
+                    name: String,
+                    signature: String,
+                ): TensorBuffer = model.createOutputBuffer(name, signature).also(allocated::add)
 
                 return try {
                     val mask = FloatArray(TARGET_LENGTH * TARGET_LENGTH)
@@ -532,16 +545,16 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                                 if (column <= row) 0.0f else -1.0e9f
                         }
                     }
-                    val causalMask = input(DECODE_MASK, DECODE_SIGNATURE)
+                    val causalMask = input(decoderModel, DECODE_MASK, DECODE_SIGNATURE)
                     causalMask.writeFloat(mask)
                     InferenceBuffers(
-                        features = input(ENCODE_INPUT, ENCODE_SIGNATURE),
-                        encoderState = output(ENCODE_OUTPUT, ENCODE_SIGNATURE),
+                        features = input(encoderModel, ENCODE_INPUT, ENCODE_SIGNATURE),
+                        encoderState = output(encoderModel, ENCODE_OUTPUT, ENCODE_SIGNATURE),
                         decoderEncoderState =
-                            input(DECODE_ENCODER_STATE, DECODE_SIGNATURE),
-                        tokens = input(DECODE_TOKENS, DECODE_SIGNATURE),
+                            input(decoderModel, DECODE_ENCODER_STATE, DECODE_SIGNATURE),
+                        tokens = input(decoderModel, DECODE_TOKENS, DECODE_SIGNATURE),
                         causalMask = causalMask,
-                        logits = output(DECODE_OUTPUT, DECODE_SIGNATURE),
+                        logits = output(decoderModel, DECODE_OUTPUT, DECODE_SIGNATURE),
                     )
                 } catch (error: Throwable) {
                     allocated.asReversed().forEach { buffer ->
@@ -578,6 +591,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             diagnosticKernelBatchSize: Int? = null,
             allowSourceQuantizedFcConvOps: Boolean = true,
             strictGpuOnly: Boolean = false,
+            diagnosticCpuOnly: Boolean = false,
             diagnosticBackend: CompiledModel.GpuOptions.Backend =
                 CompiledModel.GpuOptions.Backend.OPENCL,
             diagnosticBufferStorageType: CompiledModel.GpuOptions.BufferStorageType =
@@ -589,10 +603,22 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             diagnosticModelAssets: AssetManager? = null,
             diagnosticModelPath: String? = null,
             diagnosticModelFilePath: String? = null,
+            diagnosticEncoderModelFilePath: String? = null,
+            diagnosticDecoderModelFilePath: String? = null,
+            diagnosticSplitModelAssets: AssetManager? = null,
+            diagnosticEncoderModelPath: String? = null,
+            diagnosticDecoderModelPath: String? = null,
+            diagnosticEncoderPrecision: CompiledModel.GpuOptions.Precision =
+                diagnosticPrecision,
+            diagnosticDecoderPrecision: CompiledModel.GpuOptions.Precision =
+                diagnosticPrecision,
             timestampsEnabled: Boolean = false,
         ): LiteRtFullGpuWhisperEngine {
             require(diagnosticKernelBatchSize == null || diagnosticKernelBatchSize > 0) {
                 "GPU kernel batch size must be positive."
+            }
+            require(!(strictGpuOnly && diagnosticCpuOnly)) {
+                "Strict GPU and CPU-only execution are mutually exclusive."
             }
             require((diagnosticModelAssets == null) == (diagnosticModelPath == null)) {
                 "Diagnostic model assets and path must be supplied together."
@@ -603,6 +629,35 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             ) {
                 "Diagnostic model file and asset overrides are mutually exclusive."
             }
+            require(
+                (diagnosticEncoderModelFilePath == null) ==
+                    (diagnosticDecoderModelFilePath == null),
+            ) {
+                "Split encoder and decoder model files must be supplied together."
+            }
+            val splitAssetValues = listOf(
+                diagnosticSplitModelAssets,
+                diagnosticEncoderModelPath,
+                diagnosticDecoderModelPath,
+            )
+            require(splitAssetValues.all { it == null } || splitAssetValues.all { it != null }) {
+                "Split model assets and encoder/decoder paths must be supplied together."
+            }
+            require(
+                diagnosticEncoderModelFilePath == null || diagnosticSplitModelAssets == null,
+            ) {
+                "Split model file and asset overrides are mutually exclusive."
+            }
+            require(
+                (diagnosticEncoderModelFilePath == null && diagnosticSplitModelAssets == null) ||
+                    (
+                        diagnosticModelFilePath == null &&
+                            diagnosticModelAssets == null &&
+                            diagnosticModelPath == null
+                        ),
+            ) {
+                "Split and combined diagnostic model overrides are mutually exclusive."
+            }
             val applicationContext = context.applicationContext
             val tokenizer = applicationContext.assets.open(WhisperAssets.TOKENIZER).use {
                 WhisperTokenizer.load(it)
@@ -612,47 +667,139 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
             }
             validateConfig(config)
 
-            val accelerators = if (strictGpuOnly) {
-                arrayOf(Accelerator.GPU)
-            } else {
-                arrayOf(Accelerator.GPU, Accelerator.CPU)
+            val accelerators = when {
+                diagnosticCpuOnly -> arrayOf(Accelerator.CPU)
+                strictGpuOnly -> arrayOf(Accelerator.GPU)
+                else -> arrayOf(Accelerator.GPU, Accelerator.CPU)
             }
-            val options = CompiledModel.Options(*accelerators).apply {
-                gpuOptions = CompiledModel.GpuOptions(
-                    constantTensorSharing = true,
-                    allowSrcQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
-                    precision = diagnosticPrecision,
-                    backend = diagnosticBackend,
-                    bufferStorageType = diagnosticBufferStorageType,
-                    preferTextureWeights = diagnosticPreferTextureWeights,
-                    modelCacheKey = diagnosticHiddenRuntimeOptions(
-                        hintWaitingForCompletion = diagnosticHintWaitingForCompletion,
-                        kernelBatchSize = diagnosticKernelBatchSize,
-                        benchmarkMode = diagnosticBenchmarkMode,
-                    ),
+            fun options(
+                precision: CompiledModel.GpuOptions.Precision,
+            ) = CompiledModel.Options(*accelerators).apply {
+                if (Accelerator.GPU in accelerators) {
+                    gpuOptions = CompiledModel.GpuOptions(
+                        constantTensorSharing = true,
+                        allowSrcQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
+                        precision = precision,
+                        backend = diagnosticBackend,
+                        bufferStorageType = diagnosticBufferStorageType,
+                        preferTextureWeights = diagnosticPreferTextureWeights,
+                        modelCacheKey = diagnosticHiddenRuntimeOptions(
+                            hintWaitingForCompletion = diagnosticHintWaitingForCompletion,
+                            kernelBatchSize = diagnosticKernelBatchSize,
+                            benchmarkMode = diagnosticBenchmarkMode,
+                        ),
+                    )
+                }
+            }
+
+            fun openSplitModels(
+                openEncoder: () -> CompiledModel,
+                openDecoder: () -> CompiledModel,
+            ): LiteRtFullGpuWhisperEngine {
+                val encoderModel = openEncoder()
+                try {
+                    val decoderModel = openDecoder()
+                    try {
+                        validateEncoderContract(encoderModel)
+                        validateDecoderContract(decoderModel)
+                        return LiteRtFullGpuWhisperEngine(
+                            encoderModel = encoderModel,
+                            decoderModel = decoderModel,
+                            tokenizer = tokenizer,
+                            generationConfig = config,
+                            buffers = InferenceBuffers.allocate(encoderModel, decoderModel),
+                            featureExtractor = WhisperFeatureExtractor(),
+                            timestampsEnabled = timestampsEnabled,
+                        )
+                    } catch (error: Throwable) {
+                        decoderModel.close()
+                        throw error
+                    }
+                } catch (error: Throwable) {
+                    encoderModel.close()
+                    throw error
+                }
+            }
+
+            val splitEncoderPath = diagnosticEncoderModelFilePath
+            if (splitEncoderPath != null) {
+                return openSplitModels(
+                    openEncoder = {
+                        CompiledModel.create(splitEncoderPath, options(diagnosticEncoderPrecision))
+                    },
+                    openDecoder = {
+                        CompiledModel.create(
+                            requireNotNull(diagnosticDecoderModelFilePath),
+                            options(diagnosticDecoderPrecision),
+                        )
+                    },
                 )
             }
-            val model = if (diagnosticModelFilePath != null) {
-                CompiledModel.create(diagnosticModelFilePath, options)
+            val splitAssets = diagnosticSplitModelAssets
+            if (splitAssets != null) {
+                return openSplitModels(
+                    openEncoder = {
+                        CompiledModel.create(
+                            splitAssets,
+                            requireNotNull(diagnosticEncoderModelPath),
+                            options(diagnosticEncoderPrecision),
+                        )
+                    },
+                    openDecoder = {
+                        CompiledModel.create(
+                            splitAssets,
+                            requireNotNull(diagnosticDecoderModelPath),
+                            options(diagnosticDecoderPrecision),
+                        )
+                    },
+                )
+            }
+
+            val combinedOptions = options(diagnosticPrecision)
+            val combinedModel = if (diagnosticModelFilePath != null) {
+                CompiledModel.create(diagnosticModelFilePath, combinedOptions)
             } else {
                 val modelAssets = diagnosticModelAssets ?: applicationContext.assets
                 val modelPath = diagnosticModelPath ?: WhisperAssets.MODEL
-                CompiledModel.create(modelAssets, modelPath, options)
+                CompiledModel.create(modelAssets, modelPath, combinedOptions)
             }
             return try {
-                validateModelContract(model)
+                validateModelContract(combinedModel)
                 LiteRtFullGpuWhisperEngine(
-                    model = model,
+                    encoderModel = combinedModel,
+                    decoderModel = combinedModel,
                     tokenizer = tokenizer,
                     generationConfig = config,
-                    buffers = InferenceBuffers.allocate(model),
+                    buffers = InferenceBuffers.allocate(combinedModel, combinedModel),
                     featureExtractor = WhisperFeatureExtractor(),
                     timestampsEnabled = timestampsEnabled,
                 )
             } catch (error: Throwable) {
-                model.close()
+                combinedModel.close()
                 throw error
             }
+        }
+
+        fun openProductionSplit(
+            context: Context,
+            cpuOnly: Boolean = false,
+            timestampsEnabled: Boolean = false,
+        ): LiteRtFullGpuWhisperEngine {
+            check(WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                "The production build does not contain split Whisper models."
+            }
+            val assets = context.applicationContext.assets
+            return open(
+                context = context,
+                allowSourceQuantizedFcConvOps = false,
+                diagnosticCpuOnly = cpuOnly,
+                diagnosticSplitModelAssets = assets,
+                diagnosticEncoderModelPath = WhisperAssets.ENCODER_MODEL,
+                diagnosticDecoderModelPath = WhisperAssets.DECODER_MODEL,
+                diagnosticEncoderPrecision = CompiledModel.GpuOptions.Precision.FP32,
+                diagnosticDecoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
+                timestampsEnabled = timestampsEnabled,
+            )
         }
 
         /**
@@ -707,6 +854,11 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
         }
 
         private fun validateModelContract(model: CompiledModel) {
+            validateEncoderContract(model)
+            validateDecoderContract(model)
+        }
+
+        private fun validateEncoderContract(model: CompiledModel) {
             validateTensor(
                 "$ENCODE_SIGNATURE/$ENCODE_INPUT",
                 model.getInputTensorType(ENCODE_INPUT, ENCODE_SIGNATURE),
@@ -719,6 +871,9 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 TensorType.ElementType.FLOAT,
                 intArrayOf(1, ENCODER_FRAMES, ENCODER_WIDTH),
             )
+        }
+
+        private fun validateDecoderContract(model: CompiledModel) {
             validateTensor(
                 "$DECODE_SIGNATURE/$DECODE_ENCODER_STATE",
                 model.getInputTensorType(DECODE_ENCODER_STATE, DECODE_SIGNATURE),

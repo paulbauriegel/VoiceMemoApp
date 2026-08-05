@@ -1159,6 +1159,9 @@ def device_gpu(args: argparse.Namespace) -> dict[str, Any]:
             "externalAudioName",
             audio_name,
             "-e",
+            "timestampTokensEnabled",
+            str(args.timestamp_tokens_enabled).lower(),
+            "-e",
             "gpuPrecision",
             args.gpu_precision,
         ]
@@ -1187,15 +1190,26 @@ def device_gpu(args: argparse.Namespace) -> dict[str, Any]:
         raise ExperimentError(
             f"Android GPU benchmark failed: {device_report.get('error')}"
         )
+    if device_report.get("timestamp_tokens_enabled") is not (
+        args.timestamp_tokens_enabled
+    ):
+        raise ExperimentError("Android timestamp-token mode did not match the request.")
     baseline_report = json.loads(args.baseline_json.read_text(encoding="utf-8"))
     candidate = device_report["candidate"]
+    timestamp_token_count = int(candidate.get("timestamp_token_count", 0))
+    if not args.timestamp_tokens_enabled and timestamp_token_count != 0:
+        raise ExperimentError("Timestamp tokens were emitted while disabled.")
     result = {
         "kind": (
             f"original-versus-android-cpu-{args.cpu_workers}x{args.cpu_threads}"
             if args.backend == "cpu"
             else (
-                "original-versus-fp16-activation-fp32-accum-android-gpu"
-                if args.gpu_precision == "fp16-fp32-accum"
+                (
+                    "original-versus-native-fp16-android-gpu"
+                    if args.gpu_precision == "fp16-native"
+                    else "original-versus-fp16-activation-fp32-accum-android-gpu"
+                )
+                if args.gpu_precision != "fp32"
                 else "original-versus-fp16-weight-android-gpu-fp32"
             )
         ),
@@ -1204,6 +1218,7 @@ def device_gpu(args: argparse.Namespace) -> dict[str, Any]:
         "cpu_workers": args.cpu_workers,
         "cpu_threads_per_worker": args.cpu_threads,
         "gpu_precision": args.gpu_precision,
+        "timestamp_tokens_enabled": args.timestamp_tokens_enabled,
         "model_sha256": sha256(args.final_model),
         "baseline": baseline_report,
         "candidate": candidate,
@@ -1290,11 +1305,21 @@ def parser() -> argparse.ArgumentParser:
             child.add_argument("--cpu-threads", type=int, default=3)
             child.add_argument(
                 "--gpu-precision",
-                choices=("fp32", "fp16-fp32-accum"),
+                choices=("fp32", "fp16-native", "fp16-fp32-accum"),
                 default="fp32",
                 help=(
-                    "FP32 GPU compute, or the diagnostic LiteRT F32_F16 mode "
-                    "with FP16 data and FP32 convolution/FC accumulation"
+                    "FP32 GPU compute, native LiteRT/OpenCL FP16 compute, or "
+                    "the diagnostic patched F32_F16 mode with FP16 data and "
+                    "FP32 convolution/FC accumulation"
+                ),
+            )
+            child.add_argument(
+                "--timestamp-tokens-enabled",
+                action=argparse.BooleanOptionalAction,
+                default=False,
+                help=(
+                    "enable timestamp-token decoding; disabled by default for "
+                    "text-only benchmark parity"
                 ),
             )
             child.add_argument(
@@ -1316,8 +1341,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "final_model": "whisper-large-v3-turbo-fp16-gpu-fixed.tflite",
         "result_json": (
-            "android-gpu-fp16-activation-fp32-accum-comparison.json"
-            if getattr(args, "gpu_precision", "fp32") == "fp16-fp32-accum"
+            (
+                "android-gpu-native-fp16-comparison.json"
+                if getattr(args, "gpu_precision", "fp32") == "fp16-native"
+                else "android-gpu-fp16-activation-fp32-accum-comparison.json"
+            )
+            if getattr(args, "gpu_precision", "fp32") != "fp32"
             else "android-gpu-comparison.json"
         ),
     }

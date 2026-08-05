@@ -31,12 +31,22 @@ class WhisperBenchmarkSuiteTest(unittest.TestCase):
     def test_comparison_uses_words_and_tokens(self):
         result = SUITE.comparison(
             {"text": "Hello, world.", "tokens": [1, 2]},
-            {"text": "hello brave world", "tokens": [1, 3, 2]},
+            {
+                "text": "hello brave world",
+                "tokens": [
+                    SUITE.TIMESTAMP_BEGIN_TOKEN_ID,
+                    1,
+                    3,
+                    2,
+                    SUITE.TIMESTAMP_BEGIN_TOKEN_ID + 10,
+                ],
+            },
         )
         self.assertEqual(result["reference_words"], 2)
         self.assertEqual(result["candidate_words"], 3)
         self.assertEqual(result["word_edits"], 1)
         self.assertEqual(result["token_edits"], 1)
+        self.assertEqual(result["candidate_timestamp_tokens"], 2)
         self.assertFalse(result["exact_text_match"])
         self.assertFalse(result["exact_token_match"])
 
@@ -55,6 +65,26 @@ class WhisperBenchmarkSuiteTest(unittest.TestCase):
         )
         self.assertEqual(result, "controlled-3x-whispercpp-q8-0-vulkan-r1")
         self.assertRegex(result, r"^[A-Za-z0-9-]+$")
+
+    def test_auto_language_omits_forced_language_argument(self):
+        arguments = SUITE.instrumentation_arguments(
+            configuration=SUITE.CONFIGURATIONS[0],
+            model_name="model.bin",
+            audio_name="reference.wav",
+            run_id="auto-language-r1",
+            requested_language="auto",
+        )
+        self.assertNotIn("forcedLanguage", arguments)
+        self.assertEqual(arguments["timestampTokensEnabled"], "true")
+
+        forced_arguments = SUITE.instrumentation_arguments(
+            configuration=SUITE.CONFIGURATIONS[0],
+            model_name="model.bin",
+            audio_name="reference.wav",
+            run_id="forced-language-r1",
+            requested_language="de",
+        )
+        self.assertEqual(forced_arguments["forcedLanguage"], "de")
 
 
 if __name__ == "__main__":

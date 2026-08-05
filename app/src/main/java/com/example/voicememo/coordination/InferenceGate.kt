@@ -9,14 +9,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Recording has priority over inference. Workers check this gate between Whisper chunks.
  */
 object InferenceGate {
-    private val recording = MutableStateFlow(false)
+    private val recordingId = MutableStateFlow<String?>(null)
 
-    fun recordingStarted() {
-        recording.value = true
+    fun recordingStarted(memoId: String = LEGACY_RECORDING_ID) {
+        recordingId.value = memoId
     }
 
-    fun recordingStopped() {
-        recording.value = false
+    fun recordingStopped(memoId: String? = null) {
+        if (memoId == null || recordingId.value == memoId) {
+            recordingId.value = null
+        }
     }
 
     /**
@@ -28,19 +30,31 @@ object InferenceGate {
      * @return false when [shouldCancel] requested cancellation first.
      */
     suspend fun awaitRecordingIdle(
+        allowedRecordingId: String? = null,
         shouldCancel: () -> Boolean = { false },
     ): Boolean {
-        while (recording.value) {
+        while (
+            recordingId.value != null &&
+            recordingId.value != allowedRecordingId
+        ) {
             if (shouldCancel()) return false
             withTimeoutOrNull(CANCELLATION_POLL_MILLIS) {
-                recording.filter { active -> !active }.first()
+                recordingId.filter { active -> active == null || active == allowedRecordingId }
+                    .first()
             }
         }
         return !shouldCancel()
     }
 
     val isRecording: Boolean
-        get() = recording.value
+        get() = recordingId.value != null
+
+    fun isRecording(memoId: String): Boolean =
+        recordingId.value == memoId
+
+    fun isRecordingOtherThan(memoId: String): Boolean =
+        recordingId.value?.let { it != memoId } == true
 
     private const val CANCELLATION_POLL_MILLIS = 100L
+    private const val LEGACY_RECORDING_ID = "recording"
 }

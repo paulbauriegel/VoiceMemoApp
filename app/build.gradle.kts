@@ -62,12 +62,26 @@ val includeWhisperCppBenchmark = providers
         value.toBooleanStrictOrNull()
             ?: error("includeWhisperCppBenchmark must be true or false.")
     }
+val includeEncoderRuntimeParityDiagnostic = providers
+    .gradleProperty("includeEncoderRuntimeParityDiagnostic")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeEncoderRuntimeParityDiagnostic must be true or false.")
+    }
 val useFullFloatDecoderProduction = providers
     .gradleProperty("useFullFloatDecoderProduction")
     .orElse("false")
     .map { value ->
         value.toBooleanStrictOrNull()
             ?: error("useFullFloatDecoderProduction must be true or false.")
+    }
+val useSplitWhisperProduction = providers
+    .gradleProperty("useSplitWhisperProduction")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("useSplitWhisperProduction must be true or false.")
     }
 val rewrittenDecoderPrefixStage = providers
     .gradleProperty("rewrittenDecoderPrefixStage")
@@ -217,6 +231,22 @@ val fullFloatDecoderDiagnosticAssetRoot =
     layout.buildDirectory.dir("generated/fullFloatDecoderAndroidTestAssets")
 val fullFloatDecoderProductionAssetRoot =
     layout.buildDirectory.dir("generated/fullFloatDecoderProductionAssets")
+val splitWhisperProductionAssetRoot =
+    layout.buildDirectory.dir("generated/splitWhisperProductionAssets")
+val splitWhisperEncoderFile = rootProject.layout.projectDirectory.file(
+    "model-assets/huggingface/whisper_large_v3_turbo_split_encoder.tflite",
+)
+val splitWhisperDecoderFile = rootProject.layout.projectDirectory.file(
+    "model-assets/huggingface/whisper_large_v3_turbo_split_decoder.tflite",
+)
+val splitWhisperEncoderBytes = 648_977_860L
+val splitWhisperEncoderSha256 =
+    "a5ce67d0e53d5300c4c14509705e96f861a4d6fda7a6da3386cc3d272c54f55e"
+val splitWhisperDecoderBytes = 951_687_228L
+val splitWhisperDecoderSha256 =
+    "d0e7fb4b4230fe4f41533fa649b305298b5df17a414b6af12d4eba5aa7bd2f06"
+val splitWhisperConfigurationSha256 =
+    "32b92284e3141e16975838694940077dad3a177ac6eec4ade90247610597efed"
 val parakeetProductionAssetRoot =
     layout.buildDirectory.dir("generated/parakeetProductionAssets")
 val parakeetSourceAssetRoot =
@@ -232,6 +262,10 @@ val whisperCppVulkanHeadersRoot =
     rootProject.layout.projectDirectory.dir("build/third_party/Vulkan-Headers-1.4.350.1")
 val fullFloatDecoderProductionAssetPath =
     "whisper/whisper_large_v3_turbo_full_float_decoder.tflite"
+val splitWhisperEncoderAssetPath =
+    "whisper/whisper_large_v3_turbo_split_encoder.tflite"
+val splitWhisperDecoderAssetPath =
+    "whisper/whisper_large_v3_turbo_split_decoder.tflite"
 val sileroVadAssetRoot =
     layout.projectDirectory.dir("src/main/generatedVadAssets")
 val strictMathGpuProbeAar = rootProject.layout.projectDirectory.file(
@@ -281,12 +315,29 @@ require(
     whisperWorkerCount=1 because one rewritten GPU model peaks above 4 GB PSS.
     """.trimIndent()
 }
-require(!useStrictMathGpuProbe.get() || includeDecoderSplitDiagnostics.get()) {
+require(!(useFullFloatDecoderProduction.get() && useSplitWhisperProduction.get())) {
+    "Combined and split Whisper production models are mutually exclusive."
+}
+require(
+    !useSplitWhisperProduction.get() ||
+        (whisperBackend.get() == "gpu" && whisperWorkerCount.get() == 1),
+) {
+    "useSplitWhisperProduction requires whisperBackend=gpu and whisperWorkerCount=1."
+}
+require(
+    !useStrictMathGpuProbe.get() ||
+        includeDecoderSplitDiagnostics.get() ||
+        includeEncoderRuntimeParityDiagnostic.get(),
+) {
     """
     useStrictMathGpuProbe is a diagnostic-only dependency substitution.
-    Re-run with both -PuseStrictMathGpuProbe=true and
-    -PincludeDecoderSplitDiagnostics=true.
+    Re-run with -PuseStrictMathGpuProbe=true and either
+    -PincludeDecoderSplitDiagnostics=true or
+    -PincludeEncoderRuntimeParityDiagnostic=true.
     """.trimIndent()
+}
+require(!includeEncoderRuntimeParityDiagnostic.get() || includeWhisperCppBenchmark.get()) {
+    "includeEncoderRuntimeParityDiagnostic requires includeWhisperCppBenchmark."
 }
 require(!(useStrictMathGpuProbe.get() && useFp16Fp32AccumGpuProbe.get())) {
     "Only one diagnostic LiteRT AAR substitution may be enabled."
@@ -318,7 +369,9 @@ android {
         buildConfigField(
             "String",
             "WHISPER_MODEL_ASSET_PATH",
-            if (useFullFloatDecoderProduction.get()) {
+            if (useSplitWhisperProduction.get()) {
+                "\"$splitWhisperDecoderAssetPath\""
+            } else if (useFullFloatDecoderProduction.get()) {
                 "\"$fullFloatDecoderProductionAssetPath\""
             } else {
                 "\"whisper/whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite\""
@@ -327,7 +380,9 @@ android {
         buildConfigField(
             "long",
             "WHISPER_MODEL_SIZE_BYTES",
-            if (useFullFloatDecoderProduction.get()) {
+            if (useSplitWhisperProduction.get()) {
+                "${splitWhisperDecoderBytes}L"
+            } else if (useFullFloatDecoderProduction.get()) {
                 "${fullFloatDecoderDiagnosticBytes}L"
             } else {
                 "1094571944L"
@@ -336,11 +391,48 @@ android {
         buildConfigField(
             "String",
             "WHISPER_MODEL_SHA256",
-            if (useFullFloatDecoderProduction.get()) {
+            if (useSplitWhisperProduction.get()) {
+                "\"$splitWhisperConfigurationSha256\""
+            } else if (useFullFloatDecoderProduction.get()) {
                 "\"$fullFloatDecoderDiagnosticSha256\""
             } else {
                 "\"8e69e43d7773b856a93cc192f6308adc1d1e6c921d48c91c684bc78bf6e91418\""
             },
+        )
+        buildConfigField(
+            "boolean",
+            "WHISPER_SPLIT_MODEL_PRODUCTION",
+            useSplitWhisperProduction.get().toString(),
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_ENCODER_MODEL_ASSET_PATH",
+            "\"$splitWhisperEncoderAssetPath\"",
+        )
+        buildConfigField(
+            "long",
+            "WHISPER_ENCODER_MODEL_SIZE_BYTES",
+            "${splitWhisperEncoderBytes}L",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_ENCODER_MODEL_SHA256",
+            "\"$splitWhisperEncoderSha256\"",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_DECODER_MODEL_ASSET_PATH",
+            "\"$splitWhisperDecoderAssetPath\"",
+        )
+        buildConfigField(
+            "long",
+            "WHISPER_DECODER_MODEL_SIZE_BYTES",
+            "${splitWhisperDecoderBytes}L",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_DECODER_MODEL_SHA256",
+            "\"$splitWhisperDecoderSha256\"",
         )
         buildConfigField(
             "boolean",
@@ -390,41 +482,62 @@ android {
     }
 
     sourceSets {
-        getByName("main").assets.srcDir(sileroVadAssetRoot)
-        if (useFullFloatDecoderProduction.get()) {
-            getByName("main").assets.srcDir(fullFloatDecoderProductionAssetRoot)
-            getByName("main").assets.srcDir(parakeetProductionAssetRoot)
-            // Full-float production replaces the general generated-assets root
-            // with model-specific roots. Keep Granite explicit so title and
-            // summary generation remains available in this build mode.
-            getByName("main").assets.srcDir(graniteMetadataProductionAssetRoot)
+        getByName("main").assets.directories.add(sileroVadAssetRoot.asFile.absolutePath)
+        if (useFullFloatDecoderProduction.get() || useSplitWhisperProduction.get()) {
+            if (useFullFloatDecoderProduction.get()) {
+                getByName("main").assets.directories.add(
+                    fullFloatDecoderProductionAssetRoot.get().asFile.absolutePath,
+                )
+            } else {
+                getByName("main").assets.directories.add(
+                    splitWhisperProductionAssetRoot.get().asFile.absolutePath,
+                )
+            }
+            getByName("main").assets.directories.add(
+                parakeetProductionAssetRoot.get().asFile.absolutePath,
+            )
+            // Specialized Whisper production replaces the general generated-assets
+            // root. Keep the other production models explicit in this build mode.
+            getByName("main").assets.directories.add(
+                graniteMetadataProductionAssetRoot.get().asFile.absolutePath,
+            )
         } else {
-            getByName("main").assets.srcDir("src/main/generatedAssets")
+            getByName("main").assets.directories.add("src/main/generatedAssets")
         }
         if (includeDecoderSplitDiagnostics.get()) {
             // Large generated models are packaged only into the opt-in
             // instrumentation APK. They never replace production app assets.
-            getByName("androidTest").assets.srcDir(decoderSplitDiagnosticAssetRoot)
+            getByName("androidTest").assets.directories.add(
+                decoderSplitDiagnosticAssetRoot.get().asFile.absolutePath,
+            )
         }
         if (includeRewrittenDecoderPrefixDiagnostic.get()) {
             // This fail-closed prefix model is diagnostic-only and is never
             // included in the production APK.
-            getByName("androidTest").assets.srcDir(rewrittenDecoderPrefixAssetRoot)
+            getByName("androidTest").assets.directories.add(
+                rewrittenDecoderPrefixAssetRoot.get().asFile.absolutePath,
+            )
         }
         if (includeInt8FcRegressionDiagnostic.get()) {
             // The exact 1.65 MB INT8 K projection is independently packageable
             // so its GPU regression does not require the 1.1 GB prefix model.
-            getByName("androidTest").assets.srcDir(int8FcRegressionAssetRoot)
+            getByName("androidTest").assets.directories.add(
+                int8FcRegressionAssetRoot.get().asFile.absolutePath,
+            )
         }
         if (includeInt8FcArithmeticDiagnostic.get()) {
             // Synthetic and requantized K-projection variants isolate scale,
             // zero-point, and accumulation behavior in LiteRT's GPU INT8 FC path.
-            getByName("androidTest").assets.srcDir(int8FcArithmeticAssetRoot)
+            getByName("androidTest").assets.directories.add(
+                int8FcArithmeticAssetRoot.get().asFile.absolutePath,
+            )
         }
         if (includeFullFloatDecoderDiagnostic.get()) {
             // Complete-decoder FLOAT32 weights and mask-rank barriers remain
             // isolated to the opt-in instrumentation APK.
-            getByName("androidTest").assets.srcDir(fullFloatDecoderDiagnosticAssetRoot)
+            getByName("androidTest").assets.directories.add(
+                fullFloatDecoderDiagnosticAssetRoot.get().asFile.absolutePath,
+            )
         }
     }
 
@@ -1510,6 +1623,94 @@ tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
     }
 }
 
+val verifySplitWhisperProduction by tasks.registering {
+    group = "verification"
+    description = "Verifies the production split Whisper encoder and decoder."
+    onlyIf { useSplitWhisperProduction.get() }
+    inputs.files(splitWhisperEncoderFile, splitWhisperDecoderFile)
+    inputs.property("encoderBytes", splitWhisperEncoderBytes)
+    inputs.property("encoderSha256", splitWhisperEncoderSha256)
+    inputs.property("decoderBytes", splitWhisperDecoderBytes)
+    inputs.property("decoderSha256", splitWhisperDecoderSha256)
+
+    doLast {
+        listOf(
+            Triple(splitWhisperEncoderFile.asFile, splitWhisperEncoderBytes, splitWhisperEncoderSha256),
+            Triple(splitWhisperDecoderFile.asFile, splitWhisperDecoderBytes, splitWhisperDecoderSha256),
+        ).forEach { (model, expectedBytes, expectedSha256) ->
+            check(model.isFile) { "Split Whisper model is missing: $model" }
+            check(model.length() == expectedBytes) {
+                "${model.name} has ${model.length()} bytes; expected $expectedBytes."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            model.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actual == expectedSha256) {
+                "${model.name} SHA-256 is $actual; expected $expectedSha256."
+            }
+        }
+    }
+}
+
+val prepareSplitWhisperProduction by tasks.registering {
+    onlyIf { useSplitWhisperProduction.get() }
+    dependsOn(verifyWhisperAssets, verifySplitWhisperProduction)
+    inputs.files(splitWhisperEncoderFile, splitWhisperDecoderFile)
+    inputs.files(
+        listOf(
+            "tokenizer.json",
+            "generation_config.json",
+            "preprocessor_config.json",
+        ).map(whisperAssetDirectory::file),
+    )
+    outputs.dir(splitWhisperProductionAssetRoot)
+
+    doLast {
+        val assetRoot = splitWhisperProductionAssetRoot.get().asFile
+        check(assetRoot.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())) {
+            "Refusing to prepare split production assets outside app/build."
+        }
+        assetRoot.deleteRecursively()
+        val outputDirectory = assetRoot.resolve("whisper")
+        check(outputDirectory.mkdirs()) {
+            "Could not create ${outputDirectory.relativeTo(rootProject.projectDir)}."
+        }
+        listOf(
+            splitWhisperEncoderFile.asFile to outputDirectory.resolve(
+                "whisper_large_v3_turbo_split_encoder.tflite",
+            ),
+            splitWhisperDecoderFile.asFile to outputDirectory.resolve(
+                "whisper_large_v3_turbo_split_decoder.tflite",
+            ),
+        ).forEach { (source, destination) ->
+            try {
+                Files.createLink(destination.toPath(), source.toPath())
+            } catch (_: UnsupportedOperationException) {
+                Files.copy(source.toPath(), destination.toPath())
+            } catch (_: java.nio.file.FileSystemException) {
+                Files.copy(source.toPath(), destination.toPath())
+            }
+        }
+        listOf(
+            "tokenizer.json",
+            "generation_config.json",
+            "preprocessor_config.json",
+        ).forEach { fileName ->
+            Files.copy(
+                whisperAssetDirectory.file(fileName).asFile.toPath(),
+                outputDirectory.resolve(fileName).toPath(),
+            )
+        }
+    }
+}
+
 val verifyFullFloatDecoderDiagnostic by tasks.registering {
     group = "verification"
     description = "Verifies the fail-closed complete FLOAT32 decoder GPU model."
@@ -1605,6 +1806,8 @@ tasks.matching {
 }.configureEach {
     if (useFullFloatDecoderProduction.get()) {
         dependsOn(prepareFullFloatDecoderProduction)
+    } else if (useSplitWhisperProduction.get()) {
+        dependsOn(prepareSplitWhisperProduction)
     }
 }
 
@@ -1614,6 +1817,8 @@ tasks.matching {
 tasks.matching { it.name.contains("lint", ignoreCase = true) }.configureEach {
     if (useFullFloatDecoderProduction.get()) {
         dependsOn(prepareFullFloatDecoderProduction)
+    } else if (useSplitWhisperProduction.get()) {
+        dependsOn(prepareSplitWhisperProduction)
     }
 }
 

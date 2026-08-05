@@ -47,4 +47,22 @@ class InferenceGateTest {
             InferenceGate.recordingStopped()
         }
     }
+
+    @Test
+    fun activeRecordingCanAuthorizeOnlyItsOwnPreTranscription() = runTest {
+        InferenceGate.recordingStarted("current-memo")
+        try {
+            assertTrue(
+                InferenceGate.awaitRecordingIdle(
+                    allowedRecordingId = "current-memo",
+                ),
+            )
+            assertTrue(InferenceGate.isRecording("current-memo"))
+            assertFalse(InferenceGate.isRecording("another-memo"))
+            assertTrue(InferenceGate.isRecordingOtherThan("another-memo"))
+            assertFalse(InferenceGate.isRecordingOtherThan("current-memo"))
+        } finally {
+            InferenceGate.recordingStopped("current-memo")
+        }
+    }
 }

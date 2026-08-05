@@ -198,6 +198,10 @@ data class TranscriptionJob(
     val updatedAtMillis: Long,
     /** Stable model ID captured when the job is queued. */
     val transcriptionModelId: String = "whisper-large-v3-turbo",
+    /** Wall time spent in the segment transcription pass, excluding model loading. */
+    val transcriptionElapsedMillis: Long? = null,
+    /** Highest Android thermal status sampled during the transcription pass. */
+    val maximumThermalStatus: Int? = null,
 )
 
 @Entity(
@@ -236,6 +240,8 @@ data class TranscriptChunk(
     val truncated: Boolean,
     val warning: String?,
     val completedAtMillis: Long?,
+    /** Model inference time reported for this segment. */
+    val inferenceMillis: Long? = null,
 )
 
 /**
@@ -271,6 +277,7 @@ data class MemoAggregate(
 )
 
 data class NewMemo(
+    val id: String? = null,
     val title: String,
     val createdAtMillis: Long,
     val durationMillis: Long,
