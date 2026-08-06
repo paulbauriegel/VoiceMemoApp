@@ -12,6 +12,8 @@ cloud account, analytics SDK, or automatic cloud backup.
 - User-initiated backup, restore, import, and sharing
 - CPU and GPU transcription with automatic CPU fallback
 
+<center><img src="docs/main_view.png" style="height: 500px"/></center>
+
 ## Build
 
 Voice Memo requires Android Studio's bundled JBR (Java 17 or newer), Android
