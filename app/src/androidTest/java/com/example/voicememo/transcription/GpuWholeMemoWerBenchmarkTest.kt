@@ -80,6 +80,14 @@ class GpuWholeMemoWerBenchmarkTest {
         val externalDecoderModelName = arguments.getString(ARG_EXTERNAL_DECODER_MODEL_NAME)
         val externalDecoderModelSha256 =
             arguments.getString(ARG_EXTERNAL_DECODER_MODEL_SHA256)
+        val externalProjectionModelName =
+            arguments.getString(ARG_EXTERNAL_PROJECTION_MODEL_NAME)
+        val externalProjectionModelSha256 =
+            arguments.getString(ARG_EXTERNAL_PROJECTION_MODEL_SHA256)
+        val externalCrossCacheModelName =
+            arguments.getString(ARG_EXTERNAL_CROSS_CACHE_MODEL_NAME)
+        val externalCrossCacheModelSha256 =
+            arguments.getString(ARG_EXTERNAL_CROSS_CACHE_MODEL_SHA256)
         val externalAudioName = arguments.getString(ARG_EXTERNAL_AUDIO_NAME)
         val memoId = arguments.getString(ARG_MEMO_ID)
         val forcedLanguage = arguments.getString(ARG_FORCED_LANGUAGE)
@@ -98,6 +106,8 @@ class GpuWholeMemoWerBenchmarkTest {
         val encoderGpuPrecision = parseGpuPrecision(encoderGpuPrecisionName)
         val decoderGpuPrecision = parseGpuPrecision(decoderGpuPrecisionName)
         val splitModelRequested = externalEncoderModelName != null || externalDecoderModelName != null
+        val activeRowRequested = externalProjectionModelName != null
+        val kvCacheRequested = externalCrossCacheModelName != null
         val useFullFloatDecoder =
             arguments.getString(ARG_USE_FULL_FLOAT_DECODER)
                 ?.toBooleanStrictOrNull()
@@ -139,6 +149,18 @@ class GpuWholeMemoWerBenchmarkTest {
         }
         require(!splitModelRequested || candidateBackend == CANDIDATE_BACKEND_GPU) {
             "Split models are supported only by the GPU benchmark candidate."
+        }
+        require((externalProjectionModelName == null) == (externalProjectionModelSha256 == null)) {
+            "External projection model name and SHA-256 must be supplied together."
+        }
+        require(!activeRowRequested || splitModelRequested) {
+            "Active-row projection requires external encoder and decoder-core models."
+        }
+        require((externalCrossCacheModelName == null) == (externalCrossCacheModelSha256 == null)) {
+            "External cross-cache model name and SHA-256 must be supplied together."
+        }
+        require(!kvCacheRequested || activeRowRequested) {
+            "KV-cache decoding requires the active-row projection model."
         }
         val whisperCppModel =
             if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
@@ -185,6 +207,20 @@ class GpuWholeMemoWerBenchmarkTest {
             requireStagedFile(context, EXTERNAL_MODEL_DIRECTORY, name, ".tflite").also {
                 require(sha256(it) == externalDecoderModelSha256) {
                     "Staged decoder model SHA-256 does not match."
+                }
+            }
+        }
+        val externalProjectionModelFile = externalProjectionModelName?.let { name ->
+            requireStagedFile(context, EXTERNAL_MODEL_DIRECTORY, name, ".tflite").also {
+                require(sha256(it) == externalProjectionModelSha256) {
+                    "Staged active-row projection SHA-256 does not match."
+                }
+            }
+        }
+        val externalCrossCacheModelFile = externalCrossCacheModelName?.let { name ->
+            requireStagedFile(context, EXTERNAL_MODEL_DIRECTORY, name, ".tflite").also {
+                require(sha256(it) == externalCrossCacheModelSha256) {
+                    "Staged cross-cache model SHA-256 does not match."
                 }
             }
         }
@@ -257,6 +293,14 @@ class GpuWholeMemoWerBenchmarkTest {
             .put("external_model_name", externalModelName ?: JSONObject.NULL)
             .put("external_encoder_model_name", externalEncoderModelName ?: JSONObject.NULL)
             .put("external_decoder_model_name", externalDecoderModelName ?: JSONObject.NULL)
+            .put(
+                "external_projection_model_name",
+                externalProjectionModelName ?: JSONObject.NULL,
+            )
+            .put(
+                "external_cross_cache_model_name",
+                externalCrossCacheModelName ?: JSONObject.NULL,
+            )
             .put("requested_language", forcedLanguage ?: "auto")
             .put("gpu_precision", gpuPrecisionName)
             .put("encoder_gpu_precision", encoderGpuPrecisionName)
@@ -267,6 +311,8 @@ class GpuWholeMemoWerBenchmarkTest {
             )
             .put("encoder_model_sha256", externalEncoderModelSha256 ?: JSONObject.NULL)
             .put("decoder_model_sha256", externalDecoderModelSha256 ?: JSONObject.NULL)
+            .put("projection_model_sha256", externalProjectionModelSha256 ?: JSONObject.NULL)
+            .put("cross_cache_model_sha256", externalCrossCacheModelSha256 ?: JSONObject.NULL)
             .put("status", STATUS_RUNNING)
         fun publishCheckpoint() {
             temporaryReport.writeText(report.toString(2))
@@ -340,7 +386,37 @@ class GpuWholeMemoWerBenchmarkTest {
                                 modelFilePath = requireNotNull(externalModelPath),
                                 timestampTokensEnabled = timestampTokensEnabled,
                             )
-                            else -> listOf(
+                            else -> if (kvCacheRequested) {
+                                listOf(
+                                    LiteRtKvCacheWhisperEngine.open(
+                                        context = context,
+                                        encoderModelPath =
+                                            requireNotNull(externalEncoderModelFile).absolutePath,
+                                        crossCacheModelPath =
+                                            requireNotNull(externalCrossCacheModelFile).absolutePath,
+                                        stepModelPath =
+                                            requireNotNull(externalDecoderModelFile).absolutePath,
+                                        projectionModelPath =
+                                            requireNotNull(externalProjectionModelFile).absolutePath,
+                                        encoderPrecision = encoderGpuPrecision,
+                                        decoderPrecision = decoderGpuPrecision,
+                                    ),
+                                )
+                            } else if (activeRowRequested) {
+                                listOf(
+                                    LiteRtActiveRowWhisperEngine.open(
+                                        context = context,
+                                        encoderModelPath =
+                                            requireNotNull(externalEncoderModelFile).absolutePath,
+                                        decoderCorePath =
+                                            requireNotNull(externalDecoderModelFile).absolutePath,
+                                        activeRowProjectionPath =
+                                            requireNotNull(externalProjectionModelFile).absolutePath,
+                                        encoderPrecision = encoderGpuPrecision,
+                                        decoderPrecision = decoderGpuPrecision,
+                                    ),
+                                )
+                            } else listOf(
                                 LiteRtFullGpuWhisperEngine.open(
                                     context = context,
                                     allowSourceQuantizedFcConvOps = false,
@@ -741,8 +817,18 @@ class GpuWholeMemoWerBenchmarkTest {
         }
     }
 
-    private fun splitGpuMode(encoderPrecision: String, decoderPrecision: String): Mode =
-        when (encoderPrecision to decoderPrecision) {
+    private fun splitGpuMode(encoderPrecision: String, decoderPrecision: String): Mode {
+        val normalizedEncoder = if (encoderPrecision == GPU_PRECISION_FP16_FP32_ACCUM) {
+            GPU_PRECISION_FP16_NATIVE
+        } else {
+            encoderPrecision
+        }
+        val normalizedDecoder = if (decoderPrecision == GPU_PRECISION_FP16_FP32_ACCUM) {
+            GPU_PRECISION_FP16_NATIVE
+        } else {
+            decoderPrecision
+        }
+        return when (normalizedEncoder to normalizedDecoder) {
             GPU_PRECISION_FP32 to GPU_PRECISION_FP32 -> Mode.SPLIT_GPU_FP32_FP32
             GPU_PRECISION_FP32 to GPU_PRECISION_FP16_NATIVE -> Mode.SPLIT_GPU_FP32_FP16
             GPU_PRECISION_FP16_NATIVE to GPU_PRECISION_FP32 -> Mode.SPLIT_GPU_FP16_FP32
@@ -751,6 +837,7 @@ class GpuWholeMemoWerBenchmarkTest {
                 "Split benchmark supports only native FP32/FP16 precision combinations.",
             )
         }
+    }
 
     private enum class Mode(
         val id: String,
@@ -993,6 +1080,12 @@ class GpuWholeMemoWerBenchmarkTest {
         private const val ARG_EXTERNAL_ENCODER_MODEL_SHA256 = "externalEncoderModelSha256"
         private const val ARG_EXTERNAL_DECODER_MODEL_NAME = "externalDecoderModelName"
         private const val ARG_EXTERNAL_DECODER_MODEL_SHA256 = "externalDecoderModelSha256"
+        private const val ARG_EXTERNAL_PROJECTION_MODEL_NAME = "externalProjectionModelName"
+        private const val ARG_EXTERNAL_PROJECTION_MODEL_SHA256 =
+            "externalProjectionModelSha256"
+        private const val ARG_EXTERNAL_CROSS_CACHE_MODEL_NAME = "externalCrossCacheModelName"
+        private const val ARG_EXTERNAL_CROSS_CACHE_MODEL_SHA256 =
+            "externalCrossCacheModelSha256"
         private const val ARG_EXTERNAL_AUDIO_NAME = "externalAudioName"
         private const val ARG_FORCED_LANGUAGE = "forcedLanguage"
         private const val ARG_GPU_PRECISION = "gpuPrecision"

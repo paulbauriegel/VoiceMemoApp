@@ -796,7 +796,7 @@ internal class LiteRtFullGpuWhisperEngine private constructor(
                 diagnosticSplitModelAssets = assets,
                 diagnosticEncoderModelPath = WhisperAssets.ENCODER_MODEL,
                 diagnosticDecoderModelPath = WhisperAssets.DECODER_MODEL,
-                diagnosticEncoderPrecision = CompiledModel.GpuOptions.Precision.FP32,
+                diagnosticEncoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
                 diagnosticDecoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
                 timestampsEnabled = timestampsEnabled,
             )

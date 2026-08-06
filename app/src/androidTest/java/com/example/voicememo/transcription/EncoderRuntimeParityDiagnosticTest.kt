@@ -221,6 +221,121 @@ class EncoderRuntimeParityDiagnosticTest {
     }
 
     @Test
+    fun compareEncoderStageCrossFeed() {
+        val arguments = InstrumentationRegistry.getArguments()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val runId = requireSafeRunId(arguments.getString(ARG_RUN_ID))
+        val runtimeVariant = arguments.getString(ARG_RUNTIME_VARIANT) ?: "standard"
+        val modelName = requireSafeName(arguments.getString(ARG_ENCODER_MODEL_NAME), ".tflite")
+        val expectedModelSha = requireSha(arguments.getString(ARG_ENCODER_MODEL_SHA256))
+        val outputNames = (arguments.getString(ARG_STAGE_OUTPUTS) ?: DIAGNOSTIC_STAGE_OUTPUT)
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+        require(outputNames.isNotEmpty() && outputNames.all(SAFE_STAGE_OUTPUT::matches))
+        val model = stagedFile(context, MODEL_DIRECTORY, modelName)
+        require(sha256(model) == expectedModelSha)
+
+        fun state(argumentName: String, shaArgumentName: String): Pair<File, String> {
+            val name = requireSafeName(arguments.getString(argumentName), ".f32le")
+            val expectedSha = requireSha(arguments.getString(shaArgumentName))
+            val file = stagedFile(context, STATE_DIRECTORY, name)
+            require(sha256(file) == expectedSha) { "State file $name has the wrong SHA-256." }
+            return file to expectedSha
+        }
+
+        val (cpuInputFile, cpuInputSha) = state(
+            ARG_CPU_CROSS_FEED_INPUT_NAME,
+            ARG_CPU_CROSS_FEED_INPUT_SHA256,
+        )
+        val (gpuInputFile, gpuInputSha) = state(
+            ARG_GPU_CROSS_FEED_INPUT_NAME,
+            ARG_GPU_CROSS_FEED_INPUT_SHA256,
+        )
+        val reportDirectory = File(context.cacheDir, REPORT_DIRECTORY).apply { mkdirs() }
+        val reportFile = File(reportDirectory, "$runId-crossfeed.json")
+        val temporaryReport = File(reportDirectory, "$runId-crossfeed.json.tmp")
+        reportFile.delete()
+        temporaryReport.delete()
+        val report = JSONObject()
+            .put("run_id", runId)
+            .put("runtime_variant", runtimeVariant)
+            .put("model_name", modelName)
+            .put("model_sha256", expectedModelSha)
+            .put("cpu_input_sha256", cpuInputSha)
+            .put("gpu_input_sha256", gpuInputSha)
+            .put("decoder_executed", false)
+        try {
+            val cpuInput = readFloatArray(cpuInputFile)
+            val gpuInput = readFloatArray(gpuInputFile)
+            require(cpuInput.isNotEmpty() && cpuInput.size == gpuInput.size)
+            val cases = linkedMapOf<String, DiagnosticTensorResult>()
+            listOf("cpu_input" to cpuInput, "gpu_input" to gpuInput).forEach { (inputName, input) ->
+                cases["${inputName}_cpu"] = runLiteRtDiagnostic(
+                    name = "${inputName}_cpu",
+                    model = model,
+                    inputName = DIAGNOSTIC_CROSS_FEED_INPUT,
+                    input = input,
+                    outputNames = outputNames,
+                    accelerator = Accelerator.CPU,
+                    precision = null,
+                )
+                cases["${inputName}_gpu_fp16"] = runLiteRtDiagnostic(
+                    name = "${inputName}_gpu_fp16",
+                    model = model,
+                    inputName = DIAGNOSTIC_CROSS_FEED_INPUT,
+                    input = input,
+                    outputNames = outputNames,
+                    accelerator = Accelerator.GPU,
+                    precision = CompiledModel.GpuOptions.Precision.FP16,
+                )
+            }
+            val reference = requireNotNull(cases["cpu_input_cpu"])
+            val caseRows = JSONArray()
+            cases.values.forEach { result ->
+                val outputs = JSONArray()
+                outputNames.forEach { outputName ->
+                    val values = requireNotNull(result.outputs[outputName])
+                    val stateFile = "$runId-${safeFilePart(result.name)}-$outputName.f32le"
+                    writeFloatArray(File(reportDirectory, stateFile), values)
+                    outputs.put(
+                        JSONObject()
+                            .put("name", outputName)
+                            .put("element_count", values.size)
+                            .put("state_file", stateFile)
+                            .put("state_sha256", floatDigest(values))
+                            .put(
+                                "vs_cpu_input_cpu",
+                                compareFlatStates(
+                                    requireNotNull(reference.outputs[outputName]),
+                                    values,
+                                ),
+                            ),
+                    )
+                }
+                caseRows.put(
+                    JSONObject()
+                        .put("name", result.name)
+                        .put("inference_millis", result.inferenceMillis)
+                        .put("outputs", outputs),
+                )
+            }
+            report
+                .put("input_element_count", cpuInput.size)
+                .put("gpu_input_vs_cpu_input", compareFlatStates(cpuInput, gpuInput))
+                .put("cases", caseRows)
+                .put("status", "completed")
+        } catch (error: Throwable) {
+            report
+                .put("status", "failed")
+                .put("error_type", error.javaClass.name)
+                .put("error_message", error.message ?: error.toString())
+        }
+        temporaryReport.writeText(report.toString(2))
+        check(temporaryReport.renameTo(reportFile)) { "Could not publish stage cross-feed report." }
+    }
+
+    @Test
     fun compareFinalLayerNormCrossFeed() {
         val arguments = InstrumentationRegistry.getArguments()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -1144,6 +1259,10 @@ class EncoderRuntimeParityDiagnosticTest {
         private const val ARG_WHISPER_MODEL_NAME = "whisperModelName"
         private const val ARG_CANDIDATES = "candidates"
         private const val ARG_STAGE_OUTPUTS = "stageOutputs"
+        private const val ARG_CPU_CROSS_FEED_INPUT_NAME = "cpuCrossFeedInputName"
+        private const val ARG_CPU_CROSS_FEED_INPUT_SHA256 = "cpuCrossFeedInputSha256"
+        private const val ARG_GPU_CROSS_FEED_INPUT_NAME = "gpuCrossFeedInputName"
+        private const val ARG_GPU_CROSS_FEED_INPUT_SHA256 = "gpuCrossFeedInputSha256"
         private const val ARG_LAYER_NORM_MODEL_NAME = "layerNormModelName"
         private const val ARG_LAYER_NORM_MODEL_SHA256 = "layerNormModelSha256"
         private const val ARG_CPU_BLOCK31_NAME = "cpuBlock31Name"
@@ -1168,6 +1287,7 @@ class EncoderRuntimeParityDiagnosticTest {
         private const val DIAGNOSTIC_SIGNATURE = "diagnostic"
         private const val DIAGNOSTIC_MEL_INPUT = "mel"
         private const val DIAGNOSTIC_STAGE_OUTPUT = "stage"
+        private const val DIAGNOSTIC_CROSS_FEED_INPUT = "input"
         private const val DIAGNOSTIC_LAYER_NORM_INPUT = "block_31"
         private const val DIAGNOSTIC_LAYER_NORM_OUTPUT = "output"
         private const val REPRO_INPUT = "input"

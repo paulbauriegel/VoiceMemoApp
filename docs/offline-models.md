@@ -1,20 +1,22 @@
 # Offline models
 
 The APK bundles two selectable arm64 LiteRT transcription models. Whisper
-remains the default and existing baseline:
+remains the default. Its production GPU configuration uses the corrected
+FP16-safe encoder and original-weight decoder:
 
-- Repository: `litert-community/whisper-large-v3-turbo`
-- Revision: `4e3af6a1597a54b6e47d2899cf4f6c39932b0b7e`
-- Model: `whisper_large_v3_turbo_30s_i8_explicit_key_transpose.tflite`
-- Size: `1094571944` bytes
-- SHA-256:
-  `8e69e43d7773b856a93cc192f6308adc1d1e6c921d48c91c684bc78bf6e91418`
-- Source model SHA-256:
-  `c40690d926fe9841ef6e0296eb0c4168c2910171c1d67b4bcf00a4b7cd7989ca`
-- Rewrite: every Whisper attention-score `BATCH_MATMUL(adj_y=true)` is
-  converted to an explicit key `TRANSPOSE([0,2,1])` followed by
-  `BATCH_MATMUL(adj_y=false)`. This preserves CPU output exactly and avoids
-  LiteRT GPU's broken implicit-adjoint lowering.
+- Repository: `openai/whisper-large-v3-turbo`
+- Revision: `41f01f3fe87f28c78e2fbf8b568835947dd65ed9`
+- Source checkpoint SHA-256:
+  `542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1`
+- Encoder: `whisper_large_v3_turbo_split_encoder.tflite`, `2548210772` bytes,
+  SHA-256 `14e580c6ce2815a67c8ba0a4db334c8c016b904ecbf464d6f31911191700a87e`
+- Decoder: `whisper_large_v3_turbo_split_decoder.tflite`, `951674764` bytes,
+  SHA-256 `d661702d7753165cfaf01bf5b060f46065df500959e42e5254fd2598a54dedb7`
+- Encoder rewrite: all 65 LayerNorm variance branches scale centered
+  activations by `0.25` before squaring and restore variance by `16`, avoiding
+  native-FP16 overflow while preserving the intended FP32 calculation.
+- Runtime: OpenCL native FP16 for both encoder and decoder, with LiteRT source
+  quantization disabled.
 
 Fetch and verify the pinned development assets before building:
 

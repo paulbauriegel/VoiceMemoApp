@@ -23,6 +23,10 @@ DECODER = PROJECT_ROOT / "build/experiments/original-fp32-decoder/whisper-large-
 WHISPER_CPP = PROJECT_ROOT / "benchmark-inputs/whisper-suite/ggml-large-v3-turbo.bin"
 ENCODER_SHA256 = "01be8e811608cc9eb3780408f8e020509d216a1d5e280320232b2c0a13d5e353"
 DECODER_SHA256 = "d661702d7753165cfaf01bf5b060f46065df500959e42e5254fd2598a54dedb7"
+PROJECTION: Path | None = None
+PROJECTION_SHA256: str | None = None
+CROSS_CACHE: Path | None = None
+CROSS_CACHE_SHA256: str | None = None
 WHISPER_CPP_SHA256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
 CHECKPOINT_SHA256 = "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1"
 MODEL_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
@@ -99,7 +103,7 @@ def instrumentation_arguments(
         "timestampTokensEnabled": "false",
     }
     if configuration.runtime == "litert":
-        return common | {
+        arguments = common | {
             "candidateBackend": "gpu",
             "externalEncoderModelName": ENCODER.name,
             "externalEncoderModelSha256": ENCODER_SHA256,
@@ -108,6 +112,17 @@ def instrumentation_arguments(
             "encoderGpuPrecision": str(configuration.encoder_precision),
             "decoderGpuPrecision": str(configuration.decoder_precision),
         }
+        if PROJECTION is not None:
+            arguments |= {
+                "externalProjectionModelName": PROJECTION.name,
+                "externalProjectionModelSha256": str(PROJECTION_SHA256),
+            }
+        if CROSS_CACHE is not None:
+            arguments |= {
+                "externalCrossCacheModelName": CROSS_CACHE.name,
+                "externalCrossCacheModelSha256": str(CROSS_CACHE_SHA256),
+            }
+        return arguments
     return common | {
         "candidateBackend": "whispercpp",
         "externalModelName": WHISPER_CPP.name,
@@ -207,9 +222,13 @@ def validate(report: dict, configuration: Configuration) -> None:
         "timestamp count": isinstance(candidate, dict) and candidate.get("timestamp_token_count") == 0,
     }
     if configuration.runtime == "litert":
+        def mode_precision(value: str) -> str:
+            if value == "fp16-fp32-accum":
+                return "fp16"
+            return value.replace("-native", "")
         expected_mode = (
-            f"split-gpu-encoder-{configuration.encoder_precision.replace('-native', '')}"
-            f"-decoder-{configuration.decoder_precision.replace('-native', '')}-no-source-quant"
+            f"split-gpu-encoder-{mode_precision(configuration.encoder_precision)}"
+            f"-decoder-{mode_precision(configuration.decoder_precision)}-no-source-quant"
         )
         checks |= {
             "backend": report.get("candidate_backend") == "gpu",
@@ -219,6 +238,14 @@ def validate(report: dict, configuration: Configuration) -> None:
             "decoder precision": report.get("decoder_gpu_precision") == configuration.decoder_precision,
             "mode": isinstance(candidate, dict) and candidate.get("mode") == expected_mode,
         }
+        if PROJECTION is not None:
+            checks["projection SHA"] = (
+                report.get("projection_model_sha256") == PROJECTION_SHA256
+            )
+        if CROSS_CACHE is not None:
+            checks["cross-cache SHA"] = (
+                report.get("cross_cache_model_sha256") == CROSS_CACHE_SHA256
+            )
     else:
         checks |= {
             "backend": report.get("candidate_backend") == "whispercpp",
@@ -357,7 +384,11 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     suite = load_suite()
-    expected_models = ((ENCODER, ENCODER_SHA256), (DECODER, DECODER_SHA256), (WHISPER_CPP, WHISPER_CPP_SHA256))
+    expected_models = [(ENCODER, ENCODER_SHA256), (DECODER, DECODER_SHA256), (WHISPER_CPP, WHISPER_CPP_SHA256)]
+    if PROJECTION is not None:
+        expected_models.append((PROJECTION, str(PROJECTION_SHA256)))
+    if CROSS_CACHE is not None:
+        expected_models.append((CROSS_CACHE, str(CROSS_CACHE_SHA256)))
     for path, digest in expected_models:
         if not path.is_file() or suite.sha256(path) != digest:
             raise MatrixError(f"Missing or changed model: {path}")
@@ -391,7 +422,16 @@ def main() -> int:
         (ENCODER, f"files/gpu-models/{ENCODER.name}", ENCODER_SHA256),
         (DECODER, f"files/gpu-models/{DECODER.name}", DECODER_SHA256),
         (WHISPER_CPP, f"files/whispercpp-models/{WHISPER_CPP.name}", WHISPER_CPP_SHA256),
-    ] + [
+    ]
+    if PROJECTION is not None:
+        staged_files.append(
+            (PROJECTION, f"files/gpu-models/{PROJECTION.name}", str(PROJECTION_SHA256))
+        )
+    if CROSS_CACHE is not None:
+        staged_files.append(
+            (CROSS_CACHE, f"files/gpu-models/{CROSS_CACHE.name}", str(CROSS_CACHE_SHA256))
+        )
+    staged_files += [
         (sample.audio, f"files/gpu-audio/{audio_names[sample.id]}", suite.sha256(sample.audio))
         for sample in SAMPLES
     ]

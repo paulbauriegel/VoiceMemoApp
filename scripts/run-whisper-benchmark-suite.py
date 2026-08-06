@@ -316,10 +316,18 @@ def capture_private_file(
 
 
 def assert_device_idle(adb_path: str, serial: str) -> None:
-    run(
-        adb(adb_path, serial, "exec-out", "run-as", PACKAGE, "id"),
+    run_as = run(
+        adb(adb_path, serial, "shell", "run-as", PACKAGE, "id"),
         capture=True,
+        check=False,
     )
+    if run_as.returncode != 0:
+        detail = (run_as.stderr or run_as.stdout).strip()
+        raise SuiteError(
+            "The installed VoiceMemo build is not available to run-as; "
+            "install a signature-compatible debuggable APK in place before benchmarking."
+            + (f" Android reported: {detail}" if detail else "")
+        )
     services = run(
         adb(
             adb_path,

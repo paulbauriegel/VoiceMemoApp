@@ -239,14 +239,14 @@ val splitWhisperEncoderFile = rootProject.layout.projectDirectory.file(
 val splitWhisperDecoderFile = rootProject.layout.projectDirectory.file(
     "model-assets/huggingface/whisper_large_v3_turbo_split_decoder.tflite",
 )
-val splitWhisperEncoderBytes = 648_977_860L
+val splitWhisperEncoderBytes = 2_548_210_772L
 val splitWhisperEncoderSha256 =
-    "a5ce67d0e53d5300c4c14509705e96f861a4d6fda7a6da3386cc3d272c54f55e"
-val splitWhisperDecoderBytes = 951_687_228L
+    "14e580c6ce2815a67c8ba0a4db334c8c016b904ecbf464d6f31911191700a87e"
+val splitWhisperDecoderBytes = 951_674_764L
 val splitWhisperDecoderSha256 =
-    "d0e7fb4b4230fe4f41533fa649b305298b5df17a414b6af12d4eba5aa7bd2f06"
+    "d661702d7753165cfaf01bf5b060f46065df500959e42e5254fd2598a54dedb7"
 val splitWhisperConfigurationSha256 =
-    "32b92284e3141e16975838694940077dad3a177ac6eec4ade90247610597efed"
+    "cea8384cb8259e0ef4462f102db21bec68939e7a1ecf657226fda9796c363116"
 val parakeetProductionAssetRoot =
     layout.buildDirectory.dir("generated/parakeetProductionAssets")
 val parakeetSourceAssetRoot =

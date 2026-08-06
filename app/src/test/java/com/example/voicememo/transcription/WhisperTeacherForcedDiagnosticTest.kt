@@ -69,4 +69,22 @@ class WhisperTeacherForcedDiagnosticTest {
         assertNull(gpu.selectableTop2)
         assertNull(gpu.selectableMargin)
     }
+
+    @Test
+    fun cachedF32F16NearTieUsesAscendingTokenIdWithinBoundedWindow() {
+        fun row(margin: Float) = WhisperTeacherForcedLogitsRow(
+            logits = floatArrayOf(),
+            selectableTop1 = WhisperLogitCandidate(tokenId = 4680, score = 10f + margin),
+            selectableTop2 = WhisperLogitCandidate(tokenId = 4620, score = 10f),
+        )
+
+        assertEquals(
+            4620,
+            LiteRtKvCacheWhisperEngine.stableCachedTop1(row(0.030984879f))?.tokenId,
+        )
+        assertEquals(
+            4680,
+            LiteRtKvCacheWhisperEngine.stableCachedTop1(row(0.03126f))?.tokenId,
+        )
+    }
 }

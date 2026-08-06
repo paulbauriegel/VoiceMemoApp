@@ -134,11 +134,60 @@ internal data class WhisperSplitDecoderStep(
 internal class LiteRtSplitDecoderDiagnostic private constructor(
     private val decoderCore: DecoderCore,
     private val projection: ActiveRowProjection,
+    private val tokenizer: WhisperTokenizer,
     private val generationConfig: WhisperGenerationConfig,
     val coreBackend: WhisperSplitDecoderCoreBackend,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val inferenceLock = Any()
+
+    fun transcribeEncodedChunk(
+        encoderState: FloatArray,
+        language: WhisperLanguage.Forced,
+        shouldCancel: () -> Boolean = { false },
+        onTokenProgress: (generated: Int, limit: Int) -> Unit = { _, _ -> },
+        startedNanos: Long = System.nanoTime(),
+    ): WhisperChunkResult {
+        val generated = mutableListOf<Int>()
+        var reachedEos = false
+        val generationLimit =
+            WhisperSplitDecoderTensors.TARGET_LENGTH -
+                WhisperSplitDecoderTensors.STANDARD_PROMPT_LENGTH
+        onTokenProgress(0, generationLimit)
+        while (generated.size < generationLimit) {
+            val step = teacherForcedStep(
+                encoderState = encoderState,
+                language = language,
+                referenceTokenPrefix = generated,
+                shouldCancel = shouldCancel,
+            )
+            val nextToken = step.rankedLogits.selectableTop1?.tokenId
+                ?: throw WhisperModelContractException(
+                    "Active-row decoder produced no selectable token.",
+                )
+            if (nextToken == generationConfig.eosTokenId) {
+                reachedEos = true
+                break
+            }
+            generated += nextToken
+            onTokenProgress(generated.size, generationLimit)
+        }
+        val truncated = !reachedEos && generated.size >= generationLimit
+        return WhisperChunkResult(
+            tokens = generated,
+            text = tokenizer.decode(generated).trim(),
+            detectedLanguage = language.code,
+            inferenceMillis = (System.nanoTime() - startedNanos) / NANOS_PER_MILLISECOND,
+            truncated = truncated,
+            warnings = if (truncated) {
+                listOf("Decoder reached its 128-token limit before EOS.")
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    fun decodeTokens(tokens: List<Int>): String = tokenizer.decode(tokens)
 
     fun teacherForcedStep(
         encoderState: FloatArray,
@@ -234,6 +283,8 @@ internal class LiteRtSplitDecoderDiagnostic private constructor(
             gpuBackend: WhisperSplitDecoderGpuBackend =
                 WhisperSplitDecoderGpuBackend.OPENCL,
             strictGpuOnly: Boolean = false,
+            coreGpuPrecision: CompiledModel.GpuOptions.Precision =
+                CompiledModel.GpuOptions.Precision.FP32,
         ): LiteRtSplitDecoderDiagnostic {
             require(coreCpuThreadCount > 0) {
                 "Split decoder CPU thread count must be positive."
@@ -242,6 +293,9 @@ internal class LiteRtSplitDecoderDiagnostic private constructor(
                 configurationAssets.open(WhisperAssets.GENERATION_CONFIG).use {
                     WhisperGenerationConfig.load(it)
                 }
+            val tokenizer = configurationAssets.open(WhisperAssets.TOKENIZER).use {
+                WhisperTokenizer.load(it)
+            }
             validateGenerationConfig(generationConfig)
 
             val decoderCore = when (coreBackend) {
@@ -260,6 +314,7 @@ internal class LiteRtSplitDecoderDiagnostic private constructor(
                         allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
                         gpuBackend = gpuBackend,
                         strictGpuOnly = strictGpuOnly,
+                        precision = coreGpuPrecision,
                     )
             }
             return try {
@@ -271,6 +326,60 @@ internal class LiteRtSplitDecoderDiagnostic private constructor(
                 LiteRtSplitDecoderDiagnostic(
                     decoderCore = decoderCore,
                     projection = projection,
+                    tokenizer = tokenizer,
+                    generationConfig = generationConfig,
+                    coreBackend = coreBackend,
+                )
+            } catch (error: Throwable) {
+                decoderCore.close()
+                throw error
+            }
+        }
+
+        fun openFiles(
+            configurationAssets: AssetManager,
+            decoderCorePath: String,
+            activeRowProjectionPath: String,
+            coreBackend: WhisperSplitDecoderCoreBackend,
+            coreCpuThreadCount: Int = LiteRtWhisperEngine.DEFAULT_THREAD_COUNT,
+            allowSourceQuantizedFcConvOps: Boolean = true,
+            constantTensorSharing: Boolean = true,
+            gpuBackend: WhisperSplitDecoderGpuBackend = WhisperSplitDecoderGpuBackend.OPENCL,
+            strictGpuOnly: Boolean = false,
+            coreGpuPrecision: CompiledModel.GpuOptions.Precision =
+                CompiledModel.GpuOptions.Precision.FP32,
+        ): LiteRtSplitDecoderDiagnostic {
+            require(coreCpuThreadCount > 0) {
+                "Split decoder CPU thread count must be positive."
+            }
+            val generationConfig = configurationAssets.open(WhisperAssets.GENERATION_CONFIG).use {
+                WhisperGenerationConfig.load(it)
+            }
+            validateGenerationConfig(generationConfig)
+            val tokenizer = configurationAssets.open(WhisperAssets.TOKENIZER).use {
+                WhisperTokenizer.load(it)
+            }
+            val decoderCore = when (coreBackend) {
+                WhisperSplitDecoderCoreBackend.CPU_XNNPACK ->
+                    InterpreterDecoderCore.openFile(decoderCorePath, coreCpuThreadCount)
+                WhisperSplitDecoderCoreBackend.GPU_COMPILED_MODEL ->
+                    GpuDecoderCore.openFile(
+                        path = decoderCorePath,
+                        constantTensorSharing = constantTensorSharing,
+                        allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
+                        gpuBackend = gpuBackend,
+                        strictGpuOnly = strictGpuOnly,
+                        precision = coreGpuPrecision,
+                    )
+            }
+            return try {
+                LiteRtSplitDecoderDiagnostic(
+                    decoderCore = decoderCore,
+                    projection = ActiveRowProjection.openFile(
+                        activeRowProjectionPath,
+                        PROJECTION_THREAD_COUNT,
+                    ),
+                    tokenizer = tokenizer,
                     generationConfig = generationConfig,
                     coreBackend = coreBackend,
                 )
@@ -430,6 +539,9 @@ private class InterpreterDecoderCore private constructor(
     }
 
     companion object {
+        fun openFile(path: String, threadCount: Int): InterpreterDecoderCore =
+            create(mapModelFile(path, "split decoder core"), threadCount)
+
         fun open(
             assetManager: AssetManager,
             assetPath: String,
@@ -440,6 +552,13 @@ private class InterpreterDecoderCore private constructor(
                 assetPath = assetPath,
                 label = "split decoder core",
             )
+            return create(model, threadCount)
+        }
+
+        private fun create(
+            model: MappedByteBuffer,
+            threadCount: Int,
+        ): InterpreterDecoderCore {
             val interpreter = Interpreter(
                 model,
                 Interpreter.Options()
@@ -525,6 +644,22 @@ private class GpuDecoderCore private constructor(
     }
 
     companion object {
+        fun openFile(
+            path: String,
+            constantTensorSharing: Boolean,
+            allowSourceQuantizedFcConvOps: Boolean,
+            gpuBackend: WhisperSplitDecoderGpuBackend,
+            strictGpuOnly: Boolean,
+            precision: CompiledModel.GpuOptions.Precision,
+        ): GpuDecoderCore = openModel(
+            createModel = { options -> CompiledModel.create(path, options) },
+            constantTensorSharing = constantTensorSharing,
+            allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
+            gpuBackend = gpuBackend,
+            strictGpuOnly = strictGpuOnly,
+            precision = precision,
+        )
+
         fun open(
             assetManager: AssetManager,
             assetPath: String,
@@ -532,6 +667,23 @@ private class GpuDecoderCore private constructor(
             allowSourceQuantizedFcConvOps: Boolean,
             gpuBackend: WhisperSplitDecoderGpuBackend,
             strictGpuOnly: Boolean,
+            precision: CompiledModel.GpuOptions.Precision,
+        ): GpuDecoderCore = openModel(
+            createModel = { options -> CompiledModel.create(assetManager, assetPath, options) },
+            constantTensorSharing = constantTensorSharing,
+            allowSourceQuantizedFcConvOps = allowSourceQuantizedFcConvOps,
+            gpuBackend = gpuBackend,
+            strictGpuOnly = strictGpuOnly,
+            precision = precision,
+        )
+
+        private fun openModel(
+            createModel: (CompiledModel.Options) -> CompiledModel,
+            constantTensorSharing: Boolean,
+            allowSourceQuantizedFcConvOps: Boolean,
+            gpuBackend: WhisperSplitDecoderGpuBackend,
+            strictGpuOnly: Boolean,
+            precision: CompiledModel.GpuOptions.Precision,
         ): GpuDecoderCore {
             val selection = selectWhisperSplitDecoderGpuOptions(
                 constantTensorSharing = constantTensorSharing,
@@ -545,11 +697,11 @@ private class GpuDecoderCore private constructor(
                         constantTensorSharing = selection.constantTensorSharing,
                         allowSrcQuantizedFcConvOps =
                             selection.allowSourceQuantizedFcConvOps,
-                        precision = CompiledModel.GpuOptions.Precision.FP32,
+                        precision = precision,
                         backend = selection.backend,
                     )
                 }
-            val model = CompiledModel.create(assetManager, assetPath, options)
+            val model = createModel(options)
             val allocated = mutableListOf<TensorBuffer>()
             return try {
                 validateGpuDecoderContract(model)
@@ -578,7 +730,7 @@ private class GpuDecoderCore private constructor(
     }
 }
 
-private class ActiveRowProjection private constructor(
+internal class ActiveRowProjection private constructor(
     private val interpreter: Interpreter,
     private val bindings: ProjectionBindings,
 ) : AutoCloseable {
@@ -618,6 +770,9 @@ private class ActiveRowProjection private constructor(
     }
 
     companion object {
+        fun openFile(path: String, threadCount: Int): ActiveRowProjection =
+            create(mapModelFile(path, "active-row projection"), threadCount)
+
         fun open(
             assetManager: AssetManager,
             assetPath: String,
@@ -628,6 +783,13 @@ private class ActiveRowProjection private constructor(
                 assetPath = assetPath,
                 label = "active-row projection",
             )
+            return create(model, threadCount)
+        }
+
+        private fun create(
+            model: MappedByteBuffer,
+            threadCount: Int,
+        ): ActiveRowProjection {
             val interpreter = Interpreter(
                 model,
                 Interpreter.Options()
@@ -907,6 +1069,14 @@ private fun mapUncompressedAsset(
         "The diagnostic $label asset '$assetPath' is unavailable or compressed: " +
             (error.message ?: error.javaClass.simpleName),
     )
+}
+
+private fun mapModelFile(path: String, label: String): MappedByteBuffer {
+    val file = java.io.File(path)
+    require(file.isFile) { "Diagnostic $label is missing." }
+    return FileInputStream(file).channel.use { channel ->
+        channel.map(FileChannel.MapMode.READ_ONLY, 0L, channel.size())
+    }
 }
 
 private fun directFloatBuffer(elements: Int): ByteBuffer =

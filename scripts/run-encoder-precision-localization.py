@@ -18,6 +18,8 @@ SUITE_PATH = ROOT / "scripts/run-whisper-benchmark-suite.py"
 PARITY_RUNNER = ROOT / "scripts/run-encoder-runtime-parity.py"
 MODEL_BUILDER = ROOT / "scripts/build-encoder-stage-diagnostic-model.py"
 SCHEMA_PYTHON = ROOT / "build/tools/tflite-schema-venv/bin/python"
+SAFE_ENCODER = ROOT / "build/experiments/fp16-safe-layernorm-encoder/whisper-large-v3-turbo-fp16-safe-layernorm-encoder.tflite"
+SAFE_ENCODER_SHA256 = "14e580c6ce2815a67c8ba0a4db334c8c016b904ecbf464d6f31911191700a87e"
 BLOCK_ENCODER = ROOT / "build/experiments/encoder-block-diagnostic/whisper-large-v3-turbo-encoder-late-block-boundaries-v2.tflite"
 BLOCK_ENCODER_SHA256 = "66a250a6c9df22af2c5f59f0d24e8a06699a57a79238489f08b40324393796b8"
 LAYER_NORM_MODEL = ROOT / "build/experiments/encoder-stage-diagnostic/encoder-final-layernorm-v1.tflite"
@@ -154,13 +156,29 @@ def main() -> int:
     parser.add_argument("--thermal-timeout-seconds", type=int, default=1200)
     parser.add_argument("--run-id")
     parser.add_argument("--output", type=Path, default=ROOT / "build/reports/encoder-precision-localization")
+    parser.add_argument(
+        "--source-encoder",
+        type=Path,
+        default=SAFE_ENCODER,
+        help="Encoder graph from which stage probes are generated.",
+    )
+    parser.add_argument(
+        "--source-encoder-sha256",
+        default=SAFE_ENCODER_SHA256,
+        help="Expected SHA-256 for --source-encoder.",
+    )
     subparsers = parser.add_subparsers(dest="mode", required=True)
     subparsers.add_parser("late-blocks")
     stage = subparsers.add_parser("stage")
-    stage.add_argument("--block", type=int, choices=range(24, 32), required=True)
+    stage.add_argument("--block", type=int, choices=range(16, 32), required=True)
     stage_choice = stage.add_mutually_exclusive_group(required=True)
     stage_choice.add_argument("--stage")
     stage_choice.add_argument("--stages", nargs="+")
+    cross_feed = subparsers.add_parser("cross-feed")
+    cross_feed.add_argument("--stage-report", type=Path, required=True)
+    cross_feed.add_argument("--block", type=int, choices=range(16, 32), required=True)
+    cross_feed.add_argument("--input-stage", required=True)
+    cross_feed.add_argument("--output-stages", nargs="+", required=True)
     final_layernorm = subparsers.add_parser("final-layernorm")
     final_layernorm.add_argument(
         "--late-block-report",
@@ -179,6 +197,9 @@ def main() -> int:
     if args.mode == "stage":
         stage_names = args.stages or [args.stage]
         label = f"block{args.block}-{'-'.join(stage_names)}"
+    elif args.mode == "cross-feed":
+        stage_names = args.output_stages
+        label = f"block{args.block}-{args.input_stage}-cross-feed"
     else:
         stage_names = []
         label = "final-layernorm"
@@ -213,13 +234,17 @@ def main() -> int:
             model = Path(temporary) / "encoder-stage-diagnostic.tflite"
             python = SCHEMA_PYTHON if SCHEMA_PYTHON.is_file() else Path(sys.executable)
             build_command = [
-                    str(python),
-                    str(MODEL_BUILDER),
-                    "--output",
-                    str(model),
-                    "stage-group" if len(stage_names) > 1 else "stage",
-                    "--block",
-                    str(args.block),
+                str(python),
+                str(MODEL_BUILDER),
+                "--source",
+                str(args.source_encoder.resolve()),
+                "--source-sha256",
+                args.source_encoder_sha256,
+                "--output",
+                str(model),
+                "stage-group" if len(stage_names) > 1 else "stage",
+                "--block",
+                str(args.block),
             ]
             if len(stage_names) > 1:
                 build_command.extend(("--stages", *stage_names))
@@ -253,6 +278,97 @@ def main() -> int:
             serial,
             run_id,
             "stage",
+            output,
+            args.runtime_variant,
+            thermal_before,
+            suite,
+        )
+    elif args.mode == "cross-feed":
+        source_directory = args.stage_report.resolve()
+        source_report = json.loads((source_directory / "report.json").read_text(encoding="utf-8"))
+        if source_report.get("status") != "completed":
+            raise RuntimeError(f"Stage report is not completed: {source_directory}")
+        source_inputs: dict[str, tuple[Path, str]] = {}
+        wanted_candidates = {
+            "litert-cpu-fp32": "cpu-cross-feed-input.f32le",
+            "litert-opencl-fp16": "gpu-cross-feed-input.f32le",
+        }
+        for candidate in source_report.get("candidates", []):
+            staged_name = wanted_candidates.get(candidate.get("name"))
+            if staged_name is None:
+                continue
+            for stage_output in candidate.get("outputs", []):
+                if stage_output.get("name") != args.input_stage:
+                    continue
+                source = source_directory / stage_output["state_file"]
+                if not source.is_file():
+                    raise RuntimeError(f"Missing saved encoder stage: {source}")
+                source_inputs[staged_name] = (source, suite.sha256(source))
+        if set(source_inputs) != set(wanted_candidates.values()):
+            raise RuntimeError(
+                f"Stage report does not contain CPU and FP16 {args.input_stage} states."
+            )
+        with tempfile.TemporaryDirectory(prefix="encoder-tail-", dir=ROOT / "build/tmp") as temporary:
+            model = Path(temporary) / "encoder-stage-tail.tflite"
+            python = SCHEMA_PYTHON if SCHEMA_PYTHON.is_file() else Path(sys.executable)
+            subprocess.run(
+                [
+                    str(python),
+                    str(MODEL_BUILDER),
+                    "--source",
+                    str(args.source_encoder.resolve()),
+                    "--source-sha256",
+                    args.source_encoder_sha256,
+                    "--output",
+                    str(model),
+                    "stage-tail",
+                    "--block",
+                    str(args.block),
+                    "--input-stage",
+                    args.input_stage,
+                    "--output-stages",
+                    *args.output_stages,
+                ],
+                check=True,
+            )
+            digest = suite.sha256(model)
+            if not args.skip_stage:
+                suite.stage_private_file(
+                    args.adb,
+                    serial,
+                    model,
+                    "files/gpu-models/encoder-stage-tail.tflite",
+                    digest,
+                )
+                for staged_name, (source, state_digest) in source_inputs.items():
+                    suite.stage_private_file(
+                        args.adb,
+                        serial,
+                        source,
+                        f"files/encoder-states/{staged_name}",
+                        state_digest,
+                    )
+            instrument(
+                suite,
+                args.adb,
+                serial,
+                "compareEncoderStageCrossFeed",
+                {
+                    **common,
+                    "encoderModelName": "encoder-stage-tail.tflite",
+                    "encoderModelSha256": digest,
+                    "stageOutputs": ",".join(args.output_stages),
+                    "cpuCrossFeedInputName": "cpu-cross-feed-input.f32le",
+                    "cpuCrossFeedInputSha256": source_inputs["cpu-cross-feed-input.f32le"][1],
+                    "gpuCrossFeedInputName": "gpu-cross-feed-input.f32le",
+                    "gpuCrossFeedInputSha256": source_inputs["gpu-cross-feed-input.f32le"][1],
+                },
+            )
+        pull_report(
+            args.adb,
+            serial,
+            run_id,
+            "crossfeed",
             output,
             args.runtime_variant,
             thermal_before,
