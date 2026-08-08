@@ -239,14 +239,45 @@ val splitWhisperEncoderFile = rootProject.layout.projectDirectory.file(
 val splitWhisperDecoderFile = rootProject.layout.projectDirectory.file(
     "model-assets/huggingface/whisper_large_v3_turbo_split_decoder.tflite",
 )
-val splitWhisperEncoderBytes = 2_548_210_772L
+// FLOAT16-storage corrected encoder (LayerNorm-safe graph, FP16 weights on
+// disk). Token-identical to the FLOAT32-storage encoder on the five-sample
+// gate because the GPU delegate rounds weights to FP16 at compile time either
+// way; halves the bundled encoder from 2.55 GB to 1.27 GB.
+val splitWhisperEncoderBytes = 1_274_327_104L
 val splitWhisperEncoderSha256 =
-    "14e580c6ce2815a67c8ba0a4db334c8c016b904ecbf464d6f31911191700a87e"
+    "faf331b520fbf67896e0080b8f7803037d32b57987ec914f93e185c3692c3fc1"
 val splitWhisperDecoderBytes = 951_674_764L
 val splitWhisperDecoderSha256 =
     "d661702d7753165cfaf01bf5b060f46065df500959e42e5254fd2598a54dedb7"
+// Stateful KV-cache decoder assets (FLOAT16-stored step + cross-cache, exact
+// FLOAT32 vocabulary projection). Same artifact hashes as the five-sample
+// benchmarked research models.
+val kvCrossCacheFile = rootProject.layout.projectDirectory.file(
+    "model-assets/huggingface/whisper_large_v3_turbo_kv_cross_cache.tflite",
+)
+val kvStepFile = rootProject.layout.projectDirectory.file(
+    "model-assets/huggingface/whisper_large_v3_turbo_kv_step.tflite",
+)
+val kvProjectionFile = rootProject.layout.projectDirectory.file(
+    "model-assets/huggingface/whisper_large_v3_turbo_kv_projection_fp32.tflite",
+)
+val kvCrossCacheBytes = 26_231_580L
+val kvCrossCacheSha256 =
+    "d3402e3b1aa9b2cece3b28d2919a1e3cca3ac9655c0f0a983a58d14b937b7b21"
+val kvStepBytes = 317_655_916L
+val kvStepSha256 =
+    "13ed9528e5df1ad62582f25fe8677bc63f2c26812017e84b80e015d5aa394b7a"
+val kvProjectionBytes = 265_554_672L
+val kvProjectionSha256 =
+    "ba1eef8fed0d2edbd33fffafc2c7dfd0ac408ca2d8ed2262fec1f1a430dffd7b"
+val kvCrossCacheAssetPath = "whisper/whisper_large_v3_turbo_kv_cross_cache.tflite"
+val kvStepAssetPath = "whisper/whisper_large_v3_turbo_kv_step.tflite"
+val kvProjectionAssetPath = "whisper/whisper_large_v3_turbo_kv_projection_fp32.tflite"
+// sha256("split-whisper:encoder=<enc>:decoder=<dec>:kvstep=<step>:" +
+//        "kvcross=<cross>:kvproj=<proj>") — a configuration-identity marker
+// for transcript caching; changes whenever any bundled model changes.
 val splitWhisperConfigurationSha256 =
-    "cea8384cb8259e0ef4462f102db21bec68939e7a1ecf657226fda9796c363116"
+    "a3f8f389c8ca0c221c68ccbf0e0a1289e8d2497eae856403c3c3d92a6128f7e8"
 val parakeetProductionAssetRoot =
     layout.buildDirectory.dir("generated/parakeetProductionAssets")
 val parakeetSourceAssetRoot =
@@ -403,6 +434,26 @@ android {
             "boolean",
             "WHISPER_SPLIT_MODEL_PRODUCTION",
             useSplitWhisperProduction.get().toString(),
+        )
+        buildConfigField(
+            "boolean",
+            "WHISPER_KV_DECODER_PRODUCTION",
+            useSplitWhisperProduction.get().toString(),
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_KV_CROSS_CACHE_ASSET_PATH",
+            "\"$kvCrossCacheAssetPath\"",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_KV_STEP_ASSET_PATH",
+            "\"$kvStepAssetPath\"",
+        )
+        buildConfigField(
+            "String",
+            "WHISPER_KV_PROJECTION_ASSET_PATH",
+            "\"$kvProjectionAssetPath\"",
         )
         buildConfigField(
             "String",
@@ -1628,15 +1679,22 @@ val verifySplitWhisperProduction by tasks.registering {
     description = "Verifies the production split Whisper encoder and decoder."
     onlyIf { useSplitWhisperProduction.get() }
     inputs.files(splitWhisperEncoderFile, splitWhisperDecoderFile)
+    inputs.files(kvCrossCacheFile, kvStepFile, kvProjectionFile)
     inputs.property("encoderBytes", splitWhisperEncoderBytes)
     inputs.property("encoderSha256", splitWhisperEncoderSha256)
     inputs.property("decoderBytes", splitWhisperDecoderBytes)
     inputs.property("decoderSha256", splitWhisperDecoderSha256)
+    inputs.property("kvCrossCacheSha256", kvCrossCacheSha256)
+    inputs.property("kvStepSha256", kvStepSha256)
+    inputs.property("kvProjectionSha256", kvProjectionSha256)
 
     doLast {
         listOf(
             Triple(splitWhisperEncoderFile.asFile, splitWhisperEncoderBytes, splitWhisperEncoderSha256),
             Triple(splitWhisperDecoderFile.asFile, splitWhisperDecoderBytes, splitWhisperDecoderSha256),
+            Triple(kvCrossCacheFile.asFile, kvCrossCacheBytes, kvCrossCacheSha256),
+            Triple(kvStepFile.asFile, kvStepBytes, kvStepSha256),
+            Triple(kvProjectionFile.asFile, kvProjectionBytes, kvProjectionSha256),
         ).forEach { (model, expectedBytes, expectedSha256) ->
             check(model.isFile) { "Split Whisper model is missing: $model" }
             check(model.length() == expectedBytes) {
@@ -1663,6 +1721,7 @@ val prepareSplitWhisperProduction by tasks.registering {
     onlyIf { useSplitWhisperProduction.get() }
     dependsOn(verifyWhisperAssets, verifySplitWhisperProduction)
     inputs.files(splitWhisperEncoderFile, splitWhisperDecoderFile)
+    inputs.files(kvCrossCacheFile, kvStepFile, kvProjectionFile)
     inputs.files(
         listOf(
             "tokenizer.json",
@@ -1688,6 +1747,15 @@ val prepareSplitWhisperProduction by tasks.registering {
             ),
             splitWhisperDecoderFile.asFile to outputDirectory.resolve(
                 "whisper_large_v3_turbo_split_decoder.tflite",
+            ),
+            kvCrossCacheFile.asFile to outputDirectory.resolve(
+                "whisper_large_v3_turbo_kv_cross_cache.tflite",
+            ),
+            kvStepFile.asFile to outputDirectory.resolve(
+                "whisper_large_v3_turbo_kv_step.tflite",
+            ),
+            kvProjectionFile.asFile to outputDirectory.resolve(
+                "whisper_large_v3_turbo_kv_projection_fp32.tflite",
             ),
         ).forEach { (source, destination) ->
             try {

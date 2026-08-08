@@ -38,6 +38,8 @@ HEAD_DIM = 64
 WIDTH = 1280
 MAX_TOKENS = 128
 ENCODER_FRAMES = 1500
+VOCABULARY = 51866
+FUSED_OUTPUT = ROOT / "build/experiments/original-decoder-kv-cache-fused"
 
 
 class ExportError(RuntimeError):
@@ -255,7 +257,16 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 hidden = residual + layer.fc2(layer.activation_fn(layer.fc1(normalized)))
                 outputs[f"layer_{index}_self_key"] = updated_key
                 outputs[f"layer_{index}_self_value"] = updated_value
-            outputs["hidden"] = tf.reshape(self.decoder.layer_norm(hidden), [1, WIDTH])
+            final_hidden = tf.reshape(self.decoder.layer_norm(hidden), [1, WIDTH])
+            outputs["hidden"] = final_hidden
+            if args.fused_projection:
+                # Whisper ties the vocabulary projection to the token-embedding
+                # matrix: logits = hidden @ embed_tokens.weight^T.
+                outputs["logits"] = tf.matmul(
+                    final_hidden,
+                    self.decoder.embed_tokens.embeddings,
+                    transpose_b=True,
+                )
             return outputs
 
     cross_module = CrossCacheModule()
@@ -272,6 +283,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     }
     prompt = [model.config.decoder_start_token_id, 50259, 50360, 50364]
     maximum_error = 0.0
+    maximum_logits_error = 0.0
     prefix: list[int] = []
     for position, token in enumerate(prompt):
         prefix.append(token)
@@ -292,28 +304,56 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         ).last_hidden_state[:, -1, :]
         error = float(np.max(np.abs(candidate["hidden"].numpy() - reference.numpy())))
         maximum_error = max(maximum_error, error)
+        if args.fused_projection:
+            reference_logits = model(
+                {
+                    "decoder_input_ids": tf.constant([prefix], tf.int32),
+                    "encoder_outputs": (encoder_state,),
+                },
+                training=False,
+            ).logits[:, -1, :]
+            logits_error = float(
+                np.max(np.abs(candidate["logits"].numpy() - reference_logits.numpy()))
+            )
+            maximum_logits_error = max(maximum_logits_error, logits_error)
     require(maximum_error <= 2.0e-5, f"Host cached-step parity failed: {maximum_error}")
+    if args.fused_projection:
+        require(
+            maximum_logits_error <= 2.0e-4,
+            f"Host fused-logits parity failed: {maximum_logits_error}",
+        )
 
     output.mkdir(parents=True, exist_ok=True)
-    cross_saved = output / "saved-cross-cache"
     step_saved = output / "saved-kv-step"
-    tf.saved_model.save(cross_module, str(cross_saved), signatures={"initialize": cross_function})
     tf.saved_model.save(step_module, str(step_saved), signatures={"step": step_function})
-    cross_path = output / "decoder-cross-cache.tflite"
-    step_path = output / "decoder-kv-step.tflite"
-    cross_report = convert_signature(tf, cross_saved, "initialize", cross_path)
+    step_name = (
+        "decoder-kv-step-fused.tflite" if args.fused_projection else "decoder-kv-step.tflite"
+    )
+    step_path = output / step_name
     step_report = convert_signature(tf, step_saved, "step", step_path)
-    cross_report["contract"] = inspect_model(tf, cross_path)
     step_report["contract"] = inspect_model(tf, step_path)
+    cross_report = None
+    if not args.fused_projection:
+        cross_saved = output / "saved-cross-cache"
+        tf.saved_model.save(
+            cross_module, str(cross_saved), signatures={"initialize": cross_function}
+        )
+        cross_path = output / "decoder-cross-cache.tflite"
+        cross_report = convert_signature(tf, cross_saved, "initialize", cross_path)
+        cross_report["contract"] = inspect_model(tf, cross_path)
     report = {
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "stored_weights": "FLOAT16",
         "io_dtype": "FLOAT32",
+        "fused_projection": bool(args.fused_projection),
         "host_float32_max_abs_error": maximum_error,
-        "cross_cache": cross_report,
         "cached_step": step_report,
     }
+    if args.fused_projection:
+        report["host_float32_max_abs_logits_error"] = maximum_logits_error
+    if cross_report is not None:
+        report["cross_cache"] = cross_report
     (output / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2), flush=True)
     return report
@@ -321,9 +361,19 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument(
+        "--fused-projection",
+        action="store_true",
+        help=(
+            "Export a step model that also emits vocabulary logits via the "
+            "tied embedding matrix (reuses the existing cross-cache model)."
+        ),
+    )
     args = parser.parse_args()
+    if args.output is None:
+        args.output = FUSED_OUTPUT if args.fused_projection else DEFAULT_OUTPUT
     build(args)
     return 0
 

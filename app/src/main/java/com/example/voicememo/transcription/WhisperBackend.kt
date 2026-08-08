@@ -1,6 +1,7 @@
 package com.example.voicememo.transcription
 
 import android.content.Context
+import com.google.ai.edge.litert.CompiledModel
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -295,7 +296,26 @@ internal object LiteRtWhisperBackendFactory {
             openCpu = cpuFactory,
             openGpu = {
                 if (useFullGpuDecoder) {
-                    if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
+                    if (
+                        WhisperAssets.SPLIT_MODEL_PRODUCTION &&
+                        WhisperAssets.KV_DECODER_PRODUCTION
+                    ) {
+                        // Stateful KV-cache decoder: benchmarked at 0.281% WER
+                        // (2/712) and roughly half the full-prefix inference
+                        // time on the five-sample suite. Timestamp mode reuses
+                        // the full engine's ApplyTimestampRules selector on the
+                        // cached logits.
+                        LiteRtKvCacheWhisperEngine.openProductionAssets(
+                            context = applicationContext,
+                            encoderAssetPath = WhisperAssets.ENCODER_MODEL,
+                            crossCacheAssetPath = WhisperAssets.KV_CROSS_CACHE_MODEL,
+                            stepAssetPath = WhisperAssets.KV_STEP_MODEL,
+                            projectionAssetPath = WhisperAssets.KV_PROJECTION_MODEL,
+                            encoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
+                            decoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
+                            timestampsEnabled = timestampsEnabled,
+                        )
+                    } else if (WhisperAssets.SPLIT_MODEL_PRODUCTION) {
                         LiteRtFullGpuWhisperEngine.openProductionSplit(
                             context = applicationContext,
                             timestampsEnabled = timestampsEnabled,

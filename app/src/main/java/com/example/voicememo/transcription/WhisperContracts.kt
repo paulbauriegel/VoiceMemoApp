@@ -75,4 +75,10 @@ object WhisperAssets {
     val ENCODER_MODEL_SHA256: String = BuildConfig.WHISPER_ENCODER_MODEL_SHA256
     val DECODER_MODEL_SIZE_BYTES: Long = BuildConfig.WHISPER_DECODER_MODEL_SIZE_BYTES
     val DECODER_MODEL_SHA256: String = BuildConfig.WHISPER_DECODER_MODEL_SHA256
+
+    /** Stateful KV-cache decoder assets; bundled with the split production models. */
+    val KV_DECODER_PRODUCTION: Boolean = BuildConfig.WHISPER_KV_DECODER_PRODUCTION
+    val KV_CROSS_CACHE_MODEL: String = BuildConfig.WHISPER_KV_CROSS_CACHE_ASSET_PATH
+    val KV_STEP_MODEL: String = BuildConfig.WHISPER_KV_STEP_ASSET_PATH
+    val KV_PROJECTION_MODEL: String = BuildConfig.WHISPER_KV_PROJECTION_ASSET_PATH
 }

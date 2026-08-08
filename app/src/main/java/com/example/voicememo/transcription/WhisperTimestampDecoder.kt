@@ -118,6 +118,16 @@ internal object WhisperTimestampTokenSelector {
     }
 }
 
+internal data class WhisperSeekAdvance(
+    /** Tokens to keep. An unfinished trailing segment is excluded. */
+    val keptTokenCount: Int,
+    /**
+     * Position inside the decoded audio where generation stopped and decoding
+     * must resume, or null when the decoder consumed the whole payload.
+     */
+    val advanceMillis: Long?,
+)
+
 internal object WhisperTimestampTokens {
     const val DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID = 50_365
     const val MILLISECONDS_PER_TOKEN = 20L
@@ -144,6 +154,40 @@ internal object WhisperTimestampTokens {
         return tokens.map { token ->
             if (token >= timestampBeginTokenId) token + tokenOffset else token
         }
+    }
+
+    /**
+     * OpenAI Whisper's long-form seek rule. The timestamp grammar allows EOS
+     * after any closed segment, so an early stop is legitimate decoder output:
+     * a single trailing timestamp means the payload was fully consumed, while
+     * a decode whose last closed segment ends in a consecutive timestamp pair
+     * stopped at that pair — tokens after it belong to an unfinished segment
+     * and decoding must resume at the pair's timestamp.
+     */
+    fun seekAdvance(tokens: List<Int>, timestampBeginTokenId: Int): WhisperSeekAdvance {
+        val fullyConsumed = WhisperSeekAdvance(tokens.size, null)
+        if (tokens.size < 2) return fullyConsumed
+        val singleTimestampEnding =
+            tokens[tokens.size - 2] < timestampBeginTokenId &&
+                tokens[tokens.size - 1] >= timestampBeginTokenId
+        if (singleTimestampEnding) return fullyConsumed
+        var lastPairSecondIndex = -1
+        for (index in 0 until tokens.size - 1) {
+            if (
+                tokens[index] >= timestampBeginTokenId &&
+                tokens[index + 1] >= timestampBeginTokenId
+            ) {
+                lastPairSecondIndex = index + 1
+            }
+        }
+        if (lastPairSecondIndex < 0) return fullyConsumed
+        val advanceMillis =
+            (tokens[lastPairSecondIndex - 1] - timestampBeginTokenId).toLong() *
+                MILLISECONDS_PER_TOKEN
+        return WhisperSeekAdvance(
+            keptTokenCount = lastPairSecondIndex,
+            advanceMillis = advanceMillis,
+        )
     }
 
     fun parseSegments(

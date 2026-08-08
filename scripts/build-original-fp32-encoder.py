@@ -72,7 +72,7 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def inspect_encoder(path: Path) -> dict[str, Any]:
+def inspect_encoder(path: Path, fp16_storage: bool = False) -> dict[str, Any]:
     from tensorflow.lite.python import schema_py_generated as schema
 
     with path.open("rb") as stream:
@@ -121,10 +121,14 @@ def inspect_encoder(path: Path) -> dict[str, Any]:
                     raise ExportError(f"Encode {direction} contract changed: {actual}")
             if constant_type_counts.get("INT8", 0) != 0:
                 raise ExportError("Encoder unexpectedly contains INT8 constants")
-            if constant_type_counts.get("FLOAT16", 0) != 0:
-                raise ExportError("Encoder unexpectedly contains FLOAT16 constants")
-            if constant_type_counts.get("FLOAT32", 0) <= 0:
-                raise ExportError("Encoder contains no FLOAT32 constants")
+            if fp16_storage:
+                if constant_type_counts.get("FLOAT16", 0) <= 0:
+                    raise ExportError("FP16-storage encoder contains no FLOAT16 constants")
+            else:
+                if constant_type_counts.get("FLOAT16", 0) != 0:
+                    raise ExportError("Encoder unexpectedly contains FLOAT16 constants")
+                if constant_type_counts.get("FLOAT32", 0) <= 0:
+                    raise ExportError("Encoder contains no FLOAT32 constants")
             return {
                 **shared,
                 "tensor_type_counts": type_counts,
@@ -146,6 +150,16 @@ def rewrite_external_encoder(raw_model: Path, final_model: Path) -> int:
             for index in range(source.model.BuffersLength())
         ]
         model = schema.ModelT.InitFromObj(source.model)
+        # InitFromObj copies any INLINE buffer data into the header. write_part
+        # appends every payload as an external buffer region, so inline copies
+        # must be stripped or each weight is written twice (a sub-2 GB raw
+        # model, e.g. the FP16-storage variant, is emitted inline by the
+        # converter; the >2 GB FP32 raw is already external, where this is a
+        # no-op).
+        for buffer, payload in zip(model.buffers, payloads):
+            buffer.data = None
+            buffer.offset = 1 if payload.size else 0
+            buffer.size = payload.size
         graph = model.subgraphs[0]
         transpose_opcode = next(
             (
@@ -244,9 +258,16 @@ def export(args: argparse.Namespace) -> None:
             f"Only {free_gib:.1f} GiB is free; encoder-only export requires at least "
             f"{args.min_free_gib} GiB."
         )
+    storage = "fp16-storage" if args.fp16_storage else "fp32"
     saved_model = args.output_dir / "saved-model-fp32-encoder"
-    raw_model = args.output_dir / "whisper-large-v3-turbo-original-fp32-encoder-raw.tflite"
-    final_model = args.output_dir / "whisper-large-v3-turbo-original-fp32-encoder.tflite"
+    raw_model = (
+        args.output_dir
+        / f"whisper-large-v3-turbo-original-{storage}-encoder-raw.tflite"
+    )
+    final_model = (
+        args.output_dir
+        / f"whisper-large-v3-turbo-original-{storage}-encoder.tflite"
+    )
     guarded_paths = (saved_model, final_model)
     for path in guarded_paths:
         if path.exists():
@@ -294,10 +315,16 @@ def export(args: argparse.Namespace) -> None:
         tf.saved_model.save(module, str(saved_model), signatures={"encode": concrete})
         del model
 
-        print("Converting without quantization or FLOAT16 storage", flush=True)
+        if args.fp16_storage:
+            print("Converting with FLOAT16 weight storage (no quantization)", flush=True)
+        else:
+            print("Converting without quantization or FLOAT16 storage", flush=True)
         converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_model), signature_keys=["encode"])
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
         converter.experimental_enable_resource_variables = True
+        if args.fp16_storage:
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            converter.target_spec.supported_types = [tf.float16]
         converted = converter.convert()
         raw_model.write_bytes(converted)
         del converted
@@ -305,13 +332,13 @@ def export(args: argparse.Namespace) -> None:
     else:
         print(f"Reusing interrupted exporter output: {raw_model}", flush=True)
 
-    raw_inspection = inspect_encoder(raw_model)
+    raw_inspection = inspect_encoder(raw_model, fp16_storage=args.fp16_storage)
     counts = raw_inspection["rewrite_counts"]
     if sum(counts) <= 0:
         raise ExportError("Raw encoder has no adj_y=true attention operations to rewrite")
     raw_sha = sha256(raw_model)
     rewrite_count = rewrite_external_encoder(raw_model, final_model)
-    final_inspection = inspect_encoder(final_model)
+    final_inspection = inspect_encoder(final_model, fp16_storage=args.fp16_storage)
     if final_inspection["remaining_adj_y_true"] != 0:
         raise ExportError("Rewritten encoder still contains adj_y=true")
     if final_inspection["subgraphs"][0]["operators"] != raw_inspection["subgraphs"][0]["operators"] + rewrite_count:
@@ -324,13 +351,18 @@ def export(args: argparse.Namespace) -> None:
         / f"snapshots/{MODEL_REVISION}/model.safetensors"
     ).resolve()
     report = {
-        "kind": "original-openai-fp32-weight-encoder-litert-gpu-fixed",
+        "kind": (
+            "original-openai-fp16-storage-encoder-litert-gpu-fixed"
+            if args.fp16_storage
+            else "original-openai-fp32-weight-encoder-litert-gpu-fixed"
+        ),
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": sha256(checkpoint),
         "source_encoder_weight_dtypes": weight_dtypes,
-        "conversion_optimizations": [],
+        "stored_weights": "FLOAT16" if args.fp16_storage else "FLOAT32",
+        "conversion_optimizations": ["DEFAULT+float16"] if args.fp16_storage else [],
         "sha256": sha256(final_model),
         "bytes": final_model.stat().st_size,
         **final_inspection,
@@ -348,6 +380,15 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--min-free-gib", type=int, default=8)
     result.add_argument("--reuse-raw", action="store_true")
+    result.add_argument(
+        "--fp16-storage",
+        action="store_true",
+        help=(
+            "Store weights as FLOAT16 in the flatbuffer (whisper.cpp-style "
+            "storage). GPU delegates round weights to FP16 at compile time "
+            "either way, so device numerics should be unchanged."
+        ),
+    )
     return result
 
 

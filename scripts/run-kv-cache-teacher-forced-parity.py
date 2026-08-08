@@ -20,9 +20,18 @@ TEST_CLASS = (
     "KvCacheTeacherForcedParityTest#compareFailingChunk"
 )
 ENCODER = ROOT / "build/experiments/fp16-safe-layernorm-encoder/whisper-large-v3-turbo-fp16-safe-layernorm-encoder.tflite"
+FP16_STORAGE_ENCODER = (
+    ROOT
+    / "build/experiments/fp16-safe-layernorm-encoder-fp16-storage/"
+    "whisper-large-v3-turbo-fp16-safe-layernorm-fp16-storage-encoder.tflite"
+)
 FULL_DECODER = ROOT / "build/experiments/original-fp32-decoder/whisper-large-v3-turbo-original-fp32-decoder.tflite"
 KV_ROOT = ROOT / "build/experiments/original-decoder-kv-cache"
 STEP = KV_ROOT / "decoder-kv-step.tflite"
+FUSED_STEP = (
+    ROOT
+    / "build/experiments/original-decoder-kv-cache-fused/decoder-kv-step-fused.tflite"
+)
 CROSS = KV_ROOT / "decoder-cross-cache.tflite"
 PROJECTION = ROOT / "build/experiments/original-decoder-active-row/active-row-projection-fp32.tflite"
 AUDIO = ROOT / "benchmark-inputs/sample-test/audio.wav"
@@ -77,14 +86,33 @@ def main() -> int:
         type=Path,
         default=ROOT / "build/reports/kv-cache-teacher-forced-parity",
     )
+    parser.add_argument(
+        "--fused-projection",
+        action="store_true",
+        help="Test the fused step model (logits emitted by the step graph).",
+    )
+    parser.add_argument(
+        "--fp16-storage-encoder",
+        action="store_true",
+        help="Use the FLOAT16-stored corrected encoder.",
+    )
     args = parser.parse_args()
     suite = load_suite()
     serial = suite.one_device(args.adb, args.serial)
     suite.assert_device_idle(args.adb, serial)
     reference = json.loads(REFERENCE_REPORT.read_text())
     tokens = reference["report"]["candidate"]["chunks"][1]["tokens"]
-    run_id = datetime.now(timezone.utc).strftime("kv-parity-%Y%m%dT%H%M%SZ")
-    artifacts = [ENCODER, FULL_DECODER, STEP, CROSS, PROJECTION, AUDIO]
+    tag = "kv-parity"
+    if args.fused_projection:
+        tag += "-fused"
+    if args.fp16_storage_encoder:
+        tag += "-fp16sto"
+    run_id = datetime.now(timezone.utc).strftime(f"{tag}-%Y%m%dT%H%M%SZ")
+    encoder_model = FP16_STORAGE_ENCODER if args.fp16_storage_encoder else ENCODER
+    step_model = FUSED_STEP if args.fused_projection else STEP
+    artifacts = [encoder_model, FULL_DECODER, step_model, CROSS, AUDIO]
+    if not args.fused_projection:
+        artifacts.insert(3, PROJECTION)
     for artifact in artifacts:
         if not artifact.is_file():
             raise RuntimeError(f"Missing artifact: {artifact}")
@@ -108,7 +136,7 @@ def main() -> int:
         common = {
             "class": TEST_CLASS,
             "runId": run_id,
-            "encoderModel": ENCODER.name,
+            "encoderModel": encoder_model.name,
             "audioFile": AUDIO.name,
             "language": "de",
             "chunkIndex": "1",
@@ -120,18 +148,14 @@ def main() -> int:
             serial,
             common | {"phase": "full", "decoderModel": FULL_DECODER.name},
         )
-        cached = run_phase(
-            suite,
-            args.adb,
-            serial,
-            common
-            | {
-                "phase": "kv",
-                "crossModel": CROSS.name,
-                "stepModel": STEP.name,
-                "projectionModel": PROJECTION.name,
-            },
-        )
+        kv_arguments = {
+            "phase": "kv",
+            "crossModel": CROSS.name,
+            "stepModel": step_model.name,
+        }
+        if not args.fused_projection:
+            kv_arguments["projectionModel"] = PROJECTION.name
+        cached = run_phase(suite, args.adb, serial, common | kv_arguments)
         output = args.output.resolve() / run_id
         output.mkdir(parents=True, exist_ok=False)
         (output / "full.json").write_text(json.dumps(full, indent=2) + "\n")

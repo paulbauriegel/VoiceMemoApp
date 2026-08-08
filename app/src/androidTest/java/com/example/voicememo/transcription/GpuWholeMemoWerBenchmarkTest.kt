@@ -159,8 +159,11 @@ class GpuWholeMemoWerBenchmarkTest {
         require((externalCrossCacheModelName == null) == (externalCrossCacheModelSha256 == null)) {
             "External cross-cache model name and SHA-256 must be supplied together."
         }
-        require(!kvCacheRequested || activeRowRequested) {
-            "KV-cache decoding requires the active-row projection model."
+        // KV-cache decoding runs either with the separate FP32 projection
+        // (projection model supplied) or with a fused step model that emits
+        // logits directly (no projection model). Both need the split models.
+        require(!kvCacheRequested || splitModelRequested) {
+            "KV-cache decoding requires external encoder and step models."
         }
         val whisperCppModel =
             if (candidateBackend == CANDIDATE_BACKEND_WHISPER_CPP) {
@@ -396,10 +399,13 @@ class GpuWholeMemoWerBenchmarkTest {
                                             requireNotNull(externalCrossCacheModelFile).absolutePath,
                                         stepModelPath =
                                             requireNotNull(externalDecoderModelFile).absolutePath,
+                                        // Null when the fused step model emits
+                                        // logits directly.
                                         projectionModelPath =
-                                            requireNotNull(externalProjectionModelFile).absolutePath,
+                                            externalProjectionModelFile?.absolutePath,
                                         encoderPrecision = encoderGpuPrecision,
                                         decoderPrecision = decoderGpuPrecision,
+                                        timestampsEnabled = timestampTokensEnabled,
                                     ),
                                 )
                             } else if (activeRowRequested) {
@@ -1249,6 +1255,50 @@ class GpuWholeMemoWerBenchmarkTest {
                 .put("java_heap_committed_bytes", runtime.totalMemory())
                 .put("java_heap_max_bytes", runtime.maxMemory())
                 .put("thermal_status", thermalStatus ?: JSONObject.NULL)
+                .put("private_dirty_kib", memoryInfo.totalPrivateDirty)
+                .put("private_clean_kib", memoryInfo.totalPrivateClean)
+                .put("shared_dirty_kib", memoryInfo.totalSharedDirty)
+                .put("shared_clean_kib", memoryInfo.totalSharedClean)
+                .put(
+                    "graphics_pss_kib",
+                    memoryInfo.getMemoryStat("summary.graphics")?.toIntOrNull()
+                        ?: JSONObject.NULL,
+                )
+                .put(
+                    "code_pss_kib",
+                    memoryInfo.getMemoryStat("summary.code")?.toIntOrNull()
+                        ?: JSONObject.NULL,
+                )
+                .apply {
+                    // Anonymous vs file-backed PSS split: anonymous pages are the
+                    // OOM-relevant allocations, file-backed pages (mmap'd model
+                    // weights, code) are evictable page cache the kernel reclaims
+                    // under pressure. Available in /proc/self/smaps_rollup on
+                    // Android 10+.
+                    smapsRollupKib().forEach { (key, kib) -> put(key, kib) }
+                }
         }
+
+        private fun smapsRollupKib(): Map<String, Long> =
+            try {
+                val wanted = mapOf(
+                    "Pss_Anon" to "anon_pss_kib",
+                    "Pss_File" to "file_pss_kib",
+                    "Pss_Shmem" to "shmem_pss_kib",
+                    "Rss" to "total_rss_kib",
+                )
+                java.io.File("/proc/self/smaps_rollup").readLines()
+                    .mapNotNull { line ->
+                        val fields = line.split(":", limit = 2)
+                        if (fields.size != 2) return@mapNotNull null
+                        val jsonKey = wanted[fields[0].trim()] ?: return@mapNotNull null
+                        val kib = fields[1].trim().removeSuffix(" kB").trim()
+                            .toLongOrNull() ?: return@mapNotNull null
+                        jsonKey to kib
+                    }
+                    .toMap()
+            } catch (_: Exception) {
+                emptyMap()
+            }
     }
 }

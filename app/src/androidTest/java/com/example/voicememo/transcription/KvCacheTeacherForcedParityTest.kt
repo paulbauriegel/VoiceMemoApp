@@ -82,7 +82,10 @@ class KvCacheTeacherForcedParityTest {
         } else {
             val cross = requireFile(modelDirectory, arguments, "crossModel")
             val step = requireFile(modelDirectory, arguments, "stepModel")
-            val projection = requireFile(modelDirectory, arguments, "projectionModel")
+            // Absent when the fused step model emits logits directly.
+            val projection = arguments.getString("projectionModel")?.let {
+                requireFile(modelDirectory, arguments, "projectionModel")
+            }
             val encoderState = readFloats(encoderStateFile)
             val fullRows = readRows(fullLogitsFile)
             require(fullRows.size == referenceTokens.size)
@@ -91,7 +94,7 @@ class KvCacheTeacherForcedParityTest {
                 encoderModelPath = encoder.absolutePath,
                 crossCacheModelPath = cross.absolutePath,
                 stepModelPath = step.absolutePath,
-                projectionModelPath = projection.absolutePath,
+                projectionModelPath = projection?.absolutePath,
                 encoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
                 decoderPrecision = CompiledModel.GpuOptions.Precision.FP16,
             ).use { engine ->

@@ -191,7 +191,17 @@ def rewrite_model(
         ),
         None,
     )
-    require(scalar_template is not None, "Source graph has no FLOAT32 scalar tensor template.")
+    if scalar_template is None:
+        # FP16-storage graphs may hold every float constant as FLOAT16, so no
+        # FLOAT32 scalar exists to clone. The scale/restore constants must
+        # still be FLOAT32 because they multiply FLOAT32 activation tensors.
+        scalar_template = schema.TensorT()
+        scalar_template.shape = []
+        scalar_template.type = int(schema.TensorType.FLOAT32)
+        scalar_template.buffer = 0
+        scalar_template.name = b"fp16_safe_layernorm_scalar_template"
+        scalar_template.isVariable = False
+        scalar_template.hasRank = True
     scale_tensor = append_float_constant(
         helper, model, payloads, scalar_template, "fp16_safe_layernorm_scale", SCALE
     )

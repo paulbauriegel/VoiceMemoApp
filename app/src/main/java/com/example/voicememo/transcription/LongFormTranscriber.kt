@@ -39,6 +39,16 @@ object WhisperChunker {
     }
 }
 
+/**
+ * Trailing audio shorter than this after a closed segment counts as consumed:
+ * a 30-second-padded re-decode for it costs a full inference, and the
+ * two-second inter-window overlap re-covers real speech at the boundary.
+ */
+private const val MINIMUM_SEEK_REMAINDER_MILLIS = 500L
+
+/** Safety bound; a 28-second window never legitimately needs this many. */
+private const val MAXIMUM_SEEK_DECODES_PER_WINDOW = 12
+
 data class LongFormChunk(
     val window: AudioChunkWindow,
     val result: WhisperChunkResult,
@@ -418,7 +428,8 @@ class LongFormTranscriber(
                 ),
             )
         }
-        val initial = engine.transcribeChunk(
+        val initial = transcribeChunkCoveringAudio(
+            engine = engine,
             audio = audio,
             language = language,
             shouldCancel = shouldCancel,
@@ -438,6 +449,107 @@ class LongFormTranscriber(
         } else {
             LongFormChunk(window, initial)
         }
+    }
+
+    /**
+     * Decodes [audio] completely even when the model stops early. Whisper's
+     * timestamp grammar legitimately predicts EOS after any closed segment;
+     * the reference long-form algorithm then resumes decoding at the last
+     * emitted timestamp. Without this loop, everything between an early stop
+     * and the window end was silently dropped. Decodes without timestamp
+     * tokens (plain mode) are returned unchanged.
+     */
+    private fun transcribeChunkCoveringAudio(
+        engine: WhisperEngine,
+        audio: FloatArray,
+        language: WhisperLanguage,
+        shouldCancel: () -> Boolean,
+        onTokenProgress: (Int, Int) -> Unit,
+    ): WhisperChunkResult {
+        val timestampBegin = WhisperTimestampTokens.DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID
+        val initial = engine.transcribeChunk(audio, language, shouldCancel, onTokenProgress)
+        if (!WhisperTimestampTokens.containsTimestamp(initial.tokens, timestampBegin)) {
+            return initial
+        }
+        // Token-limit truncation keeps its dedicated half-window retry, which
+        // measures better than resuming a truncated stream at its last
+        // timestamp. This loop only handles a decoder that stopped early on
+        // its own.
+        if (initial.truncated) return initial
+        val durationMillis = audio.size * 1_000L / WhisperFeatureExtractor.SAMPLE_RATE
+        val mergedTokens = mutableListOf<Int>()
+        val mergedSegments = mutableListOf<WhisperTimedSegment>()
+        val warnings = mutableListOf<String>()
+        var mergedText = ""
+        var inferenceMillis = 0L
+        var detectedLanguage = initial.detectedLanguage
+        var offsetMillis = 0L
+        var decodes = 0
+        var unrecoverableTruncation = false
+        var current = initial
+        while (true) {
+            decodes++
+            inferenceMillis += current.inferenceMillis
+            warnings += current.warnings
+            if (detectedLanguage == "und") detectedLanguage = current.detectedLanguage
+            val advance = WhisperTimestampTokens.seekAdvance(current.tokens, timestampBegin)
+            val kept = current.tokens.subList(0, advance.keptTokenCount)
+            mergedTokens += if (offsetMillis > 0) {
+                WhisperTimestampTokens.shift(kept, timestampBegin, offsetMillis)
+            } else {
+                kept
+            }
+            val keptText = if (advance.keptTokenCount == current.tokens.size) {
+                current.text
+            } else {
+                engine.decodeTokens(kept)?.trim() ?: current.text
+            }
+            mergedText = TextConcatenator.concatenate(mergedText, keptText)
+            mergedSegments += current.timedSegments
+                .filter { advance.advanceMillis == null || it.startMillis < advance.advanceMillis }
+                .map { segment ->
+                    segment.copy(
+                        startMillis = segment.startMillis + offsetMillis,
+                        endMillis = segment.endMillis + offsetMillis,
+                    )
+                }
+            val advanceMillis = advance.advanceMillis
+            if (advanceMillis == null || advanceMillis <= 0L) {
+                unrecoverableTruncation = current.truncated
+                break
+            }
+            val resumeMillis = offsetMillis + advanceMillis
+            if (resumeMillis >= durationMillis - MINIMUM_SEEK_REMAINDER_MILLIS) break
+            if (decodes >= MAXIMUM_SEEK_DECODES_PER_WINDOW) {
+                warnings +=
+                    "A window needed more than $MAXIMUM_SEEK_DECODES_PER_WINDOW timestamp " +
+                        "continuations; trailing audio may be missing."
+                break
+            }
+            if (shouldCancel()) throw WhisperCancelledException()
+            offsetMillis = resumeMillis
+            val resumeSample = (resumeMillis * WhisperFeatureExtractor.SAMPLE_RATE / 1_000L)
+                .toInt()
+                .coerceIn(0, audio.size)
+            current = engine.transcribeChunk(
+                audio.copyOfRange(resumeSample, audio.size),
+                detectedLanguage.takeUnless { it == "und" }
+                    ?.let(WhisperLanguage::Forced)
+                    ?: language,
+                shouldCancel,
+                onTokenProgress,
+            )
+        }
+        if (decodes == 1) return initial
+        return WhisperChunkResult(
+            tokens = mergedTokens,
+            text = mergedText,
+            detectedLanguage = detectedLanguage,
+            inferenceMillis = inferenceMillis,
+            truncated = unrecoverableTruncation,
+            warnings = warnings.distinct(),
+            timedSegments = mergedSegments,
+        )
     }
 
     private fun <T> Future<T>.resultOrThrow(): T = try {
@@ -462,18 +574,20 @@ class LongFormTranscriber(
             14 * WhisperFeatureExtractor.SAMPLE_RATE,
             audio.size,
         )
-        val first = engine.transcribeChunk(
-            audio.copyOfRange(0, midpoint),
-            language,
-            shouldCancel,
-            onTokenProgress,
+        val first = transcribeChunkCoveringAudio(
+            engine = engine,
+            audio = audio.copyOfRange(0, midpoint),
+            language = language,
+            shouldCancel = shouldCancel,
+            onTokenProgress = onTokenProgress,
         )
         val second = if (midpoint < audio.size) {
-            engine.transcribeChunk(
-                audio.copyOfRange(midpoint, audio.size),
-                WhisperLanguage.Forced(first.detectedLanguage),
-                shouldCancel,
-                onTokenProgress,
+            transcribeChunkCoveringAudio(
+                engine = engine,
+                audio = audio.copyOfRange(midpoint, audio.size),
+                language = WhisperLanguage.Forced(first.detectedLanguage),
+                shouldCancel = shouldCancel,
+                onTokenProgress = onTokenProgress,
             )
         } else {
             WhisperChunkResult(

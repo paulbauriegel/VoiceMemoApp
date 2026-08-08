@@ -25,6 +25,10 @@ ENCODER_SHA256 = "01be8e811608cc9eb3780408f8e020509d216a1d5e280320232b2c0a13d5e3
 DECODER_SHA256 = "d661702d7753165cfaf01bf5b060f46065df500959e42e5254fd2598a54dedb7"
 PROJECTION: Path | None = None
 PROJECTION_SHA256: str | None = None
+# When true, candidates decode with Whisper timestamp tokens. Both WER and
+# token-error stay comparable against the pinned FP32 transcripts because
+# comparison() strips timestamp tokens from reference and candidate streams.
+TIMESTAMP_TOKENS = False
 CROSS_CACHE: Path | None = None
 CROSS_CACHE_SHA256: str | None = None
 WHISPER_CPP_SHA256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
@@ -100,7 +104,7 @@ def instrumentation_arguments(
         "candidateOnly": "true",
         "externalAudioName": audio_name,
         "forcedLanguage": sample.language,
-        "timestampTokensEnabled": "false",
+        "timestampTokensEnabled": "true" if TIMESTAMP_TOKENS else "false",
     }
     if configuration.runtime == "litert":
         arguments = common | {
@@ -215,11 +219,19 @@ def wait_for_ready(suite, adb_path: str, serial: str, timeout_seconds: int, maxi
 
 def validate(report: dict, configuration: Configuration) -> None:
     candidate = report.get("candidate")
+    timestamp_count = (
+        candidate.get("timestamp_token_count") if isinstance(candidate, dict) else None
+    )
     checks = {
         "status": report.get("status") == "completed",
         "candidate": isinstance(candidate, dict),
-        "timestamp mode": report.get("timestamp_tokens_enabled") is False,
-        "timestamp count": isinstance(candidate, dict) and candidate.get("timestamp_token_count") == 0,
+        "timestamp mode": report.get("timestamp_tokens_enabled") is TIMESTAMP_TOKENS,
+        # Timestamp campaigns must actually emit timestamp tokens; plain
+        # campaigns must emit none.
+        "timestamp count": (
+            isinstance(timestamp_count, int) and
+            (timestamp_count > 0 if TIMESTAMP_TOKENS else timestamp_count == 0)
+        ),
     }
     if configuration.runtime == "litert":
         def mode_precision(value: str) -> str:
@@ -287,6 +299,13 @@ def make_row(suite, sample: Sample, configuration: Configuration, baseline: dict
         "reference_tokens": comparison["reference_tokens"],
         "candidate_tokens": comparison["candidate_tokens"],
         "pss_kib": candidate["memory_after_inference"]["total_pss_kib"],
+        # Anonymous vs file-backed split (present once the instrumentation
+        # captures /proc/self/smaps_rollup): anonymous PSS is the OOM-relevant
+        # allocation footprint; file-backed PSS is evictable page cache from
+        # the mmap'd model weights and varies with cache warmth between runs.
+        "anon_pss_kib": candidate["memory_after_inference"].get("anon_pss_kib"),
+        "file_pss_kib": candidate["memory_after_inference"].get("file_pss_kib"),
+        "graphics_pss_kib": candidate["memory_after_inference"].get("graphics_pss_kib"),
         "warnings": candidate.get("warnings", []),
     }, comparison
 
@@ -322,6 +341,14 @@ def aggregate(rows: list[dict]) -> list[dict]:
             "token_edits": token_edits,
             "reference_tokens": reference_tokens,
             "maximum_pss_kib": max(row["pss_kib"] for row in selected),
+            "maximum_anon_pss_kib": max(
+                (row["anon_pss_kib"] for row in selected if row.get("anon_pss_kib") is not None),
+                default=None,
+            ),
+            "maximum_file_pss_kib": max(
+                (row["file_pss_kib"] for row in selected if row.get("file_pss_kib") is not None),
+                default=None,
+            ),
             "warning_count": sum(len(row["warnings"]) for row in selected),
         })
     return result
@@ -336,16 +363,18 @@ def render_markdown(matrix_id: str, samples: list[dict], rows: list[dict], aggre
         "",
         "## Aggregate",
         "",
-        "| Configuration | Model loading | Inference | End-to-end | Aggregate RTF | Micro WER | Mean sample WER | Micro token error | Max PSS | Warnings |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Configuration | Model loading | Inference | End-to-end | Aggregate RTF | Micro WER | Mean sample WER | Micro token error | Max PSS | Max anon PSS | Warnings |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in aggregates:
+        anon = row.get("maximum_anon_pss_kib")
+        anon_text = f"{anon / 1024 / 1024:.2f} GiB" if anon is not None else "n/a"
         lines.append(
             f"| {row['label']} | {row['model_load_millis'] / 1000:.3f} s | "
             f"{row['inference_millis'] / 1000:.3f} s | {row['total_millis'] / 1000:.3f} s | {row['aggregate_rtf']:.3f} | "
             f"{row['micro_word_error_percent']:.3f}% ({row['word_edits']}/{row['reference_words']}) | "
             f"{row['mean_sample_wer_percent']:.3f}% | {row['micro_token_error_percent']:.3f}% | "
-            f"{row['maximum_pss_kib'] / 1024 / 1024:.2f} GiB | {row['warning_count']} |"
+            f"{row['maximum_pss_kib'] / 1024 / 1024:.2f} GiB | {anon_text} | {row['warning_count']} |"
         )
     for sample in samples:
         lines += [
@@ -354,15 +383,20 @@ def render_markdown(matrix_id: str, samples: list[dict], rows: list[dict], aggre
             "",
             f"Duration {sample['duration_seconds']:.3f} s; language `{sample['language']}`; audio SHA-256 `{sample['audio_sha256']}`.",
             "",
-            "| Configuration | Model loading | Inference | End-to-end | RTF | WER | Token error | PSS | Thermal | Warnings |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
+            "| Configuration | Model loading | Inference | End-to-end | RTF | WER | Token error | PSS | Anon PSS | Thermal | Warnings |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
         ]
         for row in [value for value in rows if value["sample_id"] == sample["id"]]:
+            row_anon = row.get("anon_pss_kib")
+            row_anon_text = (
+                f"{row_anon / 1024 / 1024:.2f} GiB" if row_anon is not None else "n/a"
+            )
             lines.append(
                 f"| {row['label']} | {row['model_load_millis'] / 1000:.3f} s | "
                 f"{row['inference_millis'] / 1000:.3f} s | {row['total_millis'] / 1000:.3f} s | "
                 f"{row['real_time_factor']:.3f} | {row['word_error_percent']:.3f}% | {row['token_error_percent']:.3f}% | "
-                f"{row['pss_kib'] / 1024 / 1024:.2f} GiB | {row['thermal_before']['thermal_status']}→{row['thermal_after']['thermal_status']} | "
+                f"{row['pss_kib'] / 1024 / 1024:.2f} GiB | {row_anon_text} | "
+                f"{row['thermal_before']['thermal_status']}→{row['thermal_after']['thermal_status']} | "
                 f"{len(row['warnings'])} |"
             )
     return "\n".join(lines) + "\n"
