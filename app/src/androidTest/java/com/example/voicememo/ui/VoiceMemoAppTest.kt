@@ -367,6 +367,49 @@ class VoiceMemoAppTest {
     }
 
     @Test
+    fun completedTranscriptionSummaryCanBeDismissed() {
+        composeRule.setContent {
+            VoiceMemoApp(
+                uiState = VoiceMemoPreviewData.appState.copy(
+                    destination = VoiceMemoDestination.Detail,
+                    detail = VoiceMemoPreviewData.detail,
+                ),
+                onAction = {},
+                dynamicColor = false,
+            )
+        }
+
+        composeRule.onNodeWithTag("transcription_summary").assertIsDisplayed()
+        composeRule
+            .onNodeWithContentDescription("Dismiss transcription summary")
+            .performClick()
+        composeRule.onNodeWithTag("transcription_summary").assertDoesNotExist()
+    }
+
+    @Test
+    fun transcriptPanelCanBeCollapsedAndExpanded() {
+        composeRule.setContent {
+            VoiceMemoApp(
+                uiState = VoiceMemoPreviewData.appState.copy(
+                    destination = VoiceMemoDestination.Detail,
+                    detail = VoiceMemoPreviewData.detail,
+                ),
+                onAction = {},
+                dynamicColor = false,
+            )
+        }
+
+        composeRule.onNodeWithTag("transcript_text").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Collapse transcript").performClick()
+        composeRule.onNodeWithTag("transcript_text").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Skip back 5 seconds").assertDoesNotExist()
+
+        composeRule.onNodeWithContentDescription("Expand transcript").performClick()
+        composeRule.onNodeWithTag("transcript_text").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Skip back 5 seconds").assertIsDisplayed()
+    }
+
+    @Test
     fun transcriptAutomaticallyScrollsToTheActiveSegment() {
         val segments = (0 until 12).map { index ->
             val startMillis = index * 10_000L

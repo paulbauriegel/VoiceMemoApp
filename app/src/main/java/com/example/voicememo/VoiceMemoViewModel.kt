@@ -972,11 +972,28 @@ class VoiceMemoViewModel(
                     .filter { it.id in ids }
                 val shareable = withContext(Dispatchers.IO) {
                     summaries.map { summary ->
+                        val transcriptSegments = if (payload != SharePayload.Audio) {
+                            val detail = repository.observeMemo(summary.id).firstValue()
+                            if (detail?.transcript?.editedText == null) {
+                                detail?.chunks
+                                    .orEmpty()
+                                    .filter { it.rawText.isNotBlank() }
+                                    .sortedBy { it.chunkIndex }
+                                    .flatMap { chunk -> chunk.toTranscriptSegments() }
+                                    .map(TranscriptSegmentUi::text)
+                                    .orEmpty()
+                            } else {
+                                emptyList()
+                            }
+                        } else {
+                            emptyList()
+                        }
                         ShareableMemo(
                             id = summary.id,
                             title = summary.title,
                             audioPath = summary.audioPath,
                             effectiveTranscript = summary.effectiveTranscript.takeIf(String::isNotBlank),
+                            transcriptSegments = transcriptSegments,
                         )
                     }
                 }

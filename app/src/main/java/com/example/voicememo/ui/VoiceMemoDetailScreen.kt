@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -604,6 +605,12 @@ private fun TranscriptDetails(
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var transcriptionSummaryDismissed by rememberSaveable(detail.id, transcript.phase) {
+        mutableStateOf(false)
+    }
+    var transcriptPanelExpanded by rememberSaveable(detail.id) {
+        mutableStateOf(true)
+    }
     val busy = transcript.phase in setOf(
         TranscriptionPhase.Queued,
         TranscriptionPhase.Preparing,
@@ -721,14 +728,18 @@ private fun TranscriptDetails(
             }
 
             TranscriptionPhase.Complete -> {
-                TranscriptionProgress(
-                    phase = transcript.phase,
-                    statusLabel = transcript.statusLabel,
-                    progress = 1f,
-                    timingLabel = transcript.timingLabel,
-                    thermalStatusLabel = transcript.thermalStatusLabel,
-                    realTimeFactorLabel = transcript.realTimeFactorLabel,
-                )
+                if (!transcriptionSummaryDismissed) {
+                    TranscriptionProgress(
+                        phase = transcript.phase,
+                        statusLabel = transcript.statusLabel,
+                        progress = 1f,
+                        timingLabel = transcript.timingLabel,
+                        thermalStatusLabel = transcript.thermalStatusLabel,
+                        realTimeFactorLabel = transcript.realTimeFactorLabel,
+                        onDismiss = { transcriptionSummaryDismissed = true },
+                        modifier = Modifier.testTag("transcription_summary"),
+                    )
+                }
                 if (transcript.isEditing) {
                     OutlinedTextField(
                         value = transcript.draft,
@@ -755,10 +766,16 @@ private fun TranscriptDetails(
                     TranscriptFocusPanel(
                         detail = detail,
                         transcript = transcript,
+                        expanded = transcriptPanelExpanded,
+                        onExpandedChange = { transcriptPanelExpanded = it },
                         onAction = onAction,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
+                        modifier = if (transcriptPanelExpanded) {
+                            Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        } else {
+                            Modifier.fillMaxWidth()
+                        },
                     )
                     if (largeText) {
                         Column(
@@ -816,6 +833,8 @@ private fun TranscriptDetails(
 private fun TranscriptFocusPanel(
     detail: VoiceMemoDetailUi,
     transcript: TranscriptDetailUi,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -824,23 +843,65 @@ private fun TranscriptFocusPanel(
         shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            TranscriptTextPanel(
-                transcript = transcript,
-                playbackPositionMillis = detail.playbackPositionMillis,
-                containerColor = Color.Transparent,
+        Column(
+            modifier = if (expanded) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
+        ) {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-            )
-            HorizontalDivider(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
-            TranscriptPlaybackControl(
-                detail = detail,
-                onAction = onAction,
-            )
+                    .padding(start = 20.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Transcript",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                FilledTonalButton(
+                    onClick = { onExpandedChange(!expanded) },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("transcript_panel_toggle")
+                        .semantics {
+                            contentDescription = if (expanded) {
+                                "Collapse transcript"
+                            } else {
+                                "Expand transcript"
+                            }
+                        },
+                ) {
+                    Text(if (expanded) "Collapse" else "Expand")
+                    Spacer(Modifier.size(8.dp))
+                    Icon(
+                        imageVector = if (expanded) {
+                            Icons.Rounded.ExpandLess
+                        } else {
+                            Icons.Rounded.ExpandMore
+                        },
+                        contentDescription = null,
+                    )
+                }
+            }
+            if (expanded) {
+                TranscriptTextPanel(
+                    transcript = transcript,
+                    playbackPositionMillis = detail.playbackPositionMillis,
+                    containerColor = Color.Transparent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                )
+                TranscriptPlaybackControl(
+                    detail = detail,
+                    onAction = onAction,
+                )
+            }
         }
     }
 }

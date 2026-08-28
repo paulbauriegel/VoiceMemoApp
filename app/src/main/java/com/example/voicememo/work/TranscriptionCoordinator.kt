@@ -28,7 +28,7 @@ interface TranscriptionCoordinator {
         voiceActivityDetectionEnabled: Boolean = true,
         gpuAccelerationEnabled: Boolean = true,
         transcriptionModelId: String = TranscriptionModel.DEFAULT.id,
-        usePreTranscribedWindows: Boolean = false,
+        reuseRecordingStageResults: Boolean = false,
     ): String
     suspend fun cancel(memoId: String, jobId: String?)
 }
@@ -83,7 +83,7 @@ class WorkManagerTranscriptionCoordinator(
         voiceActivityDetectionEnabled: Boolean,
         gpuAccelerationEnabled: Boolean,
         transcriptionModelId: String,
-        usePreTranscribedWindows: Boolean,
+        reuseRecordingStageResults: Boolean,
     ): String {
         val normalizedLanguage = languageCode?.takeUnless { it == "auto" }
         val job = repository.createTranscriptionJob(
@@ -116,7 +116,7 @@ class WorkManagerTranscriptionCoordinator(
                     )
                     .putBoolean(
                         TranscriptionWorker.KEY_USE_PRETRANSCRIBED_WINDOWS,
-                        usePreTranscribedWindows,
+                        reuseRecordingStageResults,
                     )
                     .build(),
             )

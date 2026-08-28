@@ -75,7 +75,7 @@ class TranscriptionWorker(
             KEY_GPU_ACCELERATION_ENABLED,
             BuildConfig.WHISPER_BACKEND_REQUESTED.equals("gpu", ignoreCase = true),
         )
-        val preTranscribedWindowsRequested =
+        val recordingStageResultsRequested =
             inputData.getBoolean(KEY_USE_PRETRANSCRIBED_WINDOWS, false)
         var job = repository.getTranscriptionJob(jobId) ?: return Result.failure(
             failureData("UNKNOWN_JOB", "The transcription job no longer exists."),
@@ -91,13 +91,8 @@ class TranscriptionWorker(
                 ),
         )
         val usePreTranscribedWindows = shouldUsePreTranscribedWindows(
-            explicitlyRequested = preTranscribedWindowsRequested,
+            reuseRecordingStageResults = recordingStageResultsRequested,
             transcriptionModel = transcriptionModel,
-            firstStagedResultExists =
-                WhisperPreTranscriptionStorage.resultFile(
-                    stagedPreTranscriptionDirectory,
-                    index = 0,
-                ).isFile,
         )
         var benchmark: TranscriptionBenchmark? = null
 
@@ -164,6 +159,16 @@ class TranscriptionWorker(
                 job = repository.prepareTranscriptionJobForInference(
                     jobId = job.id,
                     inferenceFingerprint = inferenceFingerprint,
+                )
+                // Replace the enqueue-time placeholder chunk count before any
+                // pre-transcribed chunk is persisted; persistChunk raises
+                // completedChunks past a stale totalChunks otherwise.
+                job = updateJob(
+                    job.copy(
+                        totalChunks = windows.size,
+                        completedChunks = job.completedChunks.coerceAtMost(windows.size),
+                        updatedAtMillis = System.currentTimeMillis(),
+                    ),
                 )
                 if (
                     usePreTranscribedWindows &&
@@ -829,12 +834,11 @@ internal fun maximumThermalStatus(
 }
 
 internal fun shouldUsePreTranscribedWindows(
-    explicitlyRequested: Boolean,
+    reuseRecordingStageResults: Boolean,
     transcriptionModel: TranscriptionModel,
-    firstStagedResultExists: Boolean,
 ): Boolean =
     transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO &&
-        (explicitlyRequested || firstStagedResultExists)
+        reuseRecordingStageResults
 
 internal fun transcriptionWorkerCount(
     transcriptionModel: TranscriptionModel,

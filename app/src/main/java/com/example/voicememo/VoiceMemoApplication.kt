@@ -74,7 +74,7 @@ class VoiceMemoApplication : Application(), RecordingCompletionSink {
                     transcriptionModelId =
                         com.example.voicememo.transcription.TranscriptionModel
                             .WHISPER_LARGE_V3_TURBO.id,
-                    usePreTranscribedWindows = true,
+                    reuseRecordingStageResults = true,
                 )
             }.onFailure { failure ->
                 Log.e(

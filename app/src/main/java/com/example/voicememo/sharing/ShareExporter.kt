@@ -18,6 +18,7 @@ data class ShareableMemo(
     val title: String,
     val audioPath: String,
     val effectiveTranscript: String?,
+    val transcriptSegments: List<String> = emptyList(),
 )
 
 class ShareExporter(
@@ -42,7 +43,7 @@ class ShareExporter(
                     if (audio.isFile) add(FileProvider.getUriForFile(applicationContext, authority, audio))
                 }
                 if (content == ShareContent.Transcript || content == ShareContent.Both) {
-                    val transcript = memo.effectiveTranscript
+                    val transcript = memo.transcriptForShare()
                     if (!transcript.isNullOrBlank()) {
                         val textFile = File(
                             shareDirectory,
@@ -94,6 +95,15 @@ class ShareExporter(
 
     private companion object {
         const val STALE_AFTER_MILLIS = 24L * 60L * 60L * 1_000L
+    }
+}
+
+internal fun ShareableMemo.transcriptForShare(): String? {
+    val segments = transcriptSegments.map(String::trim).filter(String::isNotBlank)
+    return if (segments.isNotEmpty()) {
+        segments.joinToString(separator = "\n\n")
+    } else {
+        effectiveTranscript
     }
 }
 

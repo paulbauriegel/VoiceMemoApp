@@ -304,6 +304,7 @@ fun TranscriptionProgress(
     timingLabel: String? = null,
     thermalStatusLabel: String? = null,
     realTimeFactorLabel: String? = null,
+    onDismiss: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -311,6 +312,7 @@ fun TranscriptionProgress(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -326,7 +328,19 @@ fun TranscriptionProgress(
             Text(
                 text = statusLabel,
                 style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
             )
+            onDismiss?.let {
+                IconButton(
+                    onClick = it,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Dismiss transcription summary",
+                    )
+                }
+            }
         }
         timingLabel?.let {
             Text(

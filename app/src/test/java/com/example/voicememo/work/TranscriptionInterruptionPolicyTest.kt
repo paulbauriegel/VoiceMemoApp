@@ -29,26 +29,31 @@ class TranscriptionInterruptionPolicyTest {
     }
 
     @Test
-    fun retryDiscoversStagedWhisperResultsWithoutRequestFlag() {
+    fun recordingStopHandoffMayReuseStagedWhisperResults() {
         assertTrue(
             shouldUsePreTranscribedWindows(
-                explicitlyRequested = false,
+                reuseRecordingStageResults = true,
                 transcriptionModel = TranscriptionModel.WHISPER_LARGE_V3_TURBO,
-                firstStagedResultExists = true,
             ),
         )
+    }
+
+    @Test
+    fun manualRetranscriptionDoesNotReuseRecordingStageResults() {
         assertFalse(
             shouldUsePreTranscribedWindows(
-                explicitlyRequested = false,
+                reuseRecordingStageResults = false,
                 transcriptionModel = TranscriptionModel.WHISPER_LARGE_V3_TURBO,
-                firstStagedResultExists = false,
             ),
         )
+    }
+
+    @Test
+    fun otherModelsNeverReuseWhisperRecordingStageResults() {
         assertFalse(
             shouldUsePreTranscribedWindows(
-                explicitlyRequested = true,
+                reuseRecordingStageResults = true,
                 transcriptionModel = TranscriptionModel.PARAKEET_TDT_0_6B_V3,
-                firstStagedResultExists = true,
             ),
         )
     }
