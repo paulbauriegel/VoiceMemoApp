@@ -1303,6 +1303,7 @@ class VoiceMemoViewModel(
             enabled = local.transcriptionTimingEnabled,
             phase = transcriptState.phase,
             transcriptionElapsedMillis = latestJob?.transcriptionElapsedMillis,
+            segmentInferenceMillis = chunks.mapNotNull(TranscriptChunk::inferenceMillis),
             audioDurationMillis = memo.durationMillis,
         )
         return VoiceMemoDetailUi(
@@ -1752,21 +1753,34 @@ internal fun transcriptionThermalStatusLabel(
     }
 }
 
+/**
+ * Real-time factor of the finished transcript.
+ *
+ * The job's wall-clock stopwatch only covers the segments the post-recording
+ * worker still had to run: windows pre-transcribed while recording are
+ * persisted before it starts, and it keeps ticking while the job is paused for
+ * another recording. Every persisted chunk carries its own measured inference
+ * time (pre-transcribed ones included), so their sum is the numerator whenever
+ * it is available. The stopwatch is only a fallback for chunks stored before
+ * inference timings were recorded.
+ */
 internal fun transcriptionRealTimeFactorLabel(
     enabled: Boolean,
     phase: TranscriptionPhase,
     transcriptionElapsedMillis: Long?,
+    segmentInferenceMillis: List<Long>,
     audioDurationMillis: Long,
 ): String? {
-    if (
-        !enabled ||
-        phase != TranscriptionPhase.Complete ||
-        transcriptionElapsedMillis == null ||
-        audioDurationMillis <= 0L
-    ) {
+    if (!enabled || phase != TranscriptionPhase.Complete || audioDurationMillis <= 0L) {
         return null
     }
-    val factor = transcriptionElapsedMillis.toDouble() / audioDurationMillis
+    val completedSegmentTimings = segmentInferenceMillis.filter { it >= 0L }
+    val processingMillis = completedSegmentTimings
+        .takeIf(List<Long>::isNotEmpty)
+        ?.sum()
+        ?: transcriptionElapsedMillis
+        ?: return null
+    val factor = processingMillis.toDouble() / audioDurationMillis
     return String.format(Locale.US, "RTF %.3f", factor)
 }
 

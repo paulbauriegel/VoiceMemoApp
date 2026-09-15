@@ -78,13 +78,16 @@ class TranscriptionTimingPresentationTest {
     }
 
     @Test
-    fun completedTranscriptShowsRealTimeFactor() {
+    fun completedTranscriptShowsRealTimeFactorFromSummedSegmentInference() {
+        // A memo pre-transcribed while recording: the job stopwatch only saw the
+        // final segment, but every chunk kept its measured inference time.
         assertEquals(
             "RTF 0.500",
             transcriptionRealTimeFactorLabel(
                 enabled = true,
                 phase = TranscriptionPhase.Complete,
-                transcriptionElapsedMillis = 30_000L,
+                transcriptionElapsedMillis = 3_000L,
+                segmentInferenceMillis = listOf(12_000L, 15_000L, 3_000L),
                 audioDurationMillis = 60_000L,
             ),
         )
@@ -92,7 +95,31 @@ class TranscriptionTimingPresentationTest {
             transcriptionRealTimeFactorLabel(
                 enabled = true,
                 phase = TranscriptionPhase.Transcribing,
+                transcriptionElapsedMillis = 3_000L,
+                segmentInferenceMillis = listOf(12_000L, 15_000L, 3_000L),
+                audioDurationMillis = 60_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun realTimeFactorFallsBackToWallTimeWithoutSegmentTimings() {
+        assertEquals(
+            "RTF 0.500",
+            transcriptionRealTimeFactorLabel(
+                enabled = true,
+                phase = TranscriptionPhase.Complete,
                 transcriptionElapsedMillis = 30_000L,
+                segmentInferenceMillis = emptyList(),
+                audioDurationMillis = 60_000L,
+            ),
+        )
+        assertNull(
+            transcriptionRealTimeFactorLabel(
+                enabled = true,
+                phase = TranscriptionPhase.Complete,
+                transcriptionElapsedMillis = null,
+                segmentInferenceMillis = emptyList(),
                 audioDurationMillis = 60_000L,
             ),
         )

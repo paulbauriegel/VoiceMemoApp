@@ -14,7 +14,11 @@ import kotlin.math.min
  * Output layout is [mel][frame], matching the LiteRT encode tensor
  * `[1, 128, 3000]`.
  */
-class WhisperFeatureExtractor {
+internal fun interface WhisperFeatureProvider {
+    fun extract(pcm16Khz: FloatArray): FloatArray
+}
+
+class WhisperFeatureExtractor : WhisperFeatureProvider {
     private val fft = MixedRadixFft(FFT_SIZE)
     private val frame = FloatArray(FFT_SIZE)
     private val power = FloatArray(FFT_BINS)
@@ -37,7 +41,7 @@ class WhisperFeatureExtractor {
     }
 
     @Synchronized
-    fun extract(pcm16Khz: FloatArray): FloatArray {
+    override fun extract(pcm16Khz: FloatArray): FloatArray {
         val fixedAudio = FloatArray(MAX_SAMPLES)
         pcm16Khz.copyInto(
             destination = fixedAudio,

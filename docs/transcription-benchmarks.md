@@ -86,6 +86,49 @@ text/tokens/timings plus host-recalculated WER evidence are stored under
 repeat the command with `--resume`; existing reports and hashes are validated
 before the next missing run starts.
 
+## SKaiNET-audio frontend comparison
+
+The SKaiNET-audio benchmark compares the current VoiceMemo WAV/mel frontend
+with `sk.ainet.audio:audio-wav:0.2.1` and `audio-mel:0.2.1`. Both frontends use
+the same bundled LiteRT Whisper model, two workers, three threads, forced
+fixture language, 28-second windows, and two-second overlap:
+
+```sh
+scripts/run-skainet-audio-benchmark.py plan
+scripts/run-skainet-audio-benchmark.py run --serial DEVICE_SERIAL
+```
+
+The five pinned fixtures run three times per frontend from fresh processes,
+followed by one PCM/mel parity pass per fixture. Resume an interrupted suite
+with the same output identifier:
+
+```sh
+scripts/run-skainet-audio-benchmark.py run \
+  --serial DEVICE_SERIAL \
+  --suite-id SUITE_ID \
+  --resume
+```
+
+This runner builds with `-PisolatedBenchmarkPackage=true` and installs only
+`com.example.voicememo.benchmark` plus its instrumentation package. The
+isolated target has no enabled launcher. It never installs, uninstalls,
+clears, or reads private files from `com.example.voicememo`; public package
+metadata is captured before and after the run and must remain identical.
+Staged WAVs and device reports are removed only from the benchmark package.
+
+Reports are written under
+`build/reports/skainet-audio-benchmark/SUITE_ID/`. They include all raw device
+transcripts, per-file and corpus RTF, frontend timing, process CPU time, peak
+PSS sampling, thermal snapshots, and WER edit counts. WER is disagreement with
+the pinned OpenAI Whisper large-v3-turbo FP32 baseline, not human-ground-truth
+WER.
+
+SKaiNET-audio 0.2.1 is published with Kotlin 2.4 metadata while VoiceMemo is
+kept on Kotlin 2.2. The artifacts therefore remain runtime-only test
+dependencies; a cached reflection bridge calls their public JVM methods. This
+uses the published library without changing the production compiler or adding
+SKaiNET classes to the production APK.
+
 The default build uses two parallel Whisper interpreters with three
 CPU/XNNPACK threads each. It does not create a GPU delegate. Every
 transcription writes a content-free benchmark report to app-private storage

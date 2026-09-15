@@ -151,6 +151,13 @@ val installReleaseLocally = providers
         value.toBooleanStrictOrNull()
             ?: error("installReleaseLocally must be true or false.")
     }
+val isolatedBenchmarkPackage = providers
+    .gradleProperty("isolatedBenchmarkPackage")
+    .orElse("false")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("isolatedBenchmarkPackage must be true or false.")
+    }
 val decoderSplitDiagnosticStage = providers
     .gradleProperty("decoderSplitDiagnosticStage")
     .orElse("post-layernorm")
@@ -504,6 +511,7 @@ android {
         }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["mainActivityEnabled"] = "true"
         vectorDrawables.useSupportLibrary = true
 
         ndk {
@@ -517,6 +525,12 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            if (isolatedBenchmarkPackage.get()) {
+                applicationIdSuffix = ".benchmark"
+                manifestPlaceholders["mainActivityEnabled"] = "false"
+            }
+        }
         getByName("release") {
             // Normal release builds remain unsigned. The shared Android Studio
             // "Install Release" configuration opts into the debug key so AGP
@@ -1985,6 +1999,11 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.room:room-testing:2.8.4")
+    // SKaiNET-audio 0.2.1 uses Kotlin 2.4 metadata while the app intentionally
+    // remains on Kotlin 2.2. Package the test-only runtime and call its stable
+    // JVM surface through the benchmark's cached reflection bridge.
+    androidTestRuntimeOnly("sk.ainet.audio:audio-mel:0.2.1")
+    androidTestRuntimeOnly("sk.ainet.audio:audio-wav:0.2.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

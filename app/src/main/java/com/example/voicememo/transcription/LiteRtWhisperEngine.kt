@@ -17,7 +17,7 @@ class LiteRtWhisperEngine private constructor(
     private val tokenizer: WhisperTokenizer,
     private val generationConfig: WhisperGenerationConfig,
     private val bindings: Bindings,
-    private val featureExtractor: WhisperFeatureExtractor,
+    private val featureExtractor: WhisperFeatureProvider,
     private val timestampsEnabled: Boolean,
 ) : WhisperEngine {
     private val closed = AtomicBoolean(false)
@@ -545,6 +545,33 @@ class LiteRtWhisperEngine private constructor(
             threadCount: Int = DEFAULT_THREAD_COUNT,
             timestampsEnabled: Boolean = false,
             diagnosticModelFilePath: String? = null,
+        ): LiteRtWhisperEngine = openInternal(
+            context = context,
+            threadCount = threadCount,
+            timestampsEnabled = timestampsEnabled,
+            diagnosticModelFilePath = diagnosticModelFilePath,
+            featureExtractor = WhisperFeatureExtractor(),
+        )
+
+        /** Test-only injection point for non-persisting frontend benchmarks. */
+        internal fun openForBenchmark(
+            context: Context,
+            threadCount: Int,
+            featureExtractor: WhisperFeatureProvider,
+        ): LiteRtWhisperEngine = openInternal(
+            context = context,
+            threadCount = threadCount,
+            timestampsEnabled = false,
+            diagnosticModelFilePath = null,
+            featureExtractor = featureExtractor,
+        )
+
+        private fun openInternal(
+            context: Context,
+            threadCount: Int,
+            timestampsEnabled: Boolean,
+            diagnosticModelFilePath: String?,
+            featureExtractor: WhisperFeatureProvider,
         ): LiteRtWhisperEngine {
             require(threadCount > 0) { "LiteRT thread count must be positive." }
             val applicationContext = context.applicationContext
@@ -573,7 +600,7 @@ class LiteRtWhisperEngine private constructor(
                     tokenizer = tokenizer,
                     generationConfig = config,
                     bindings = bindings,
-                    featureExtractor = WhisperFeatureExtractor(),
+                    featureExtractor = featureExtractor,
                     timestampsEnabled = timestampsEnabled,
                 )
             } catch (error: Throwable) {
