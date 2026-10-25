@@ -70,7 +70,16 @@ class Media3MemoPlayer(
     }
 
     override fun seekTo(positionMillis: Long) {
-        player.seekTo(positionMillis.coerceIn(0L, player.duration.coerceAtLeast(0L)))
+        // Duration is unknown until the media is prepared; ExoPlayer applies
+        // an early seek once it is.
+        val duration = player.duration
+        player.seekTo(
+            if (duration > 0L) {
+                positionMillis.coerceIn(0L, duration)
+            } else {
+                positionMillis.coerceAtLeast(0L)
+            },
+        )
         publish()
     }
 

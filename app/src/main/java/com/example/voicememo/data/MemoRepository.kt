@@ -88,6 +88,21 @@ interface MemoRepository {
         editedAtMillis: Long = System.currentTimeMillis(),
     )
 
+    /**
+     * Stores (or with a null [text], reverts) one segment correction and
+     * mirrors [effectiveText], the joined segments after the change, into the
+     * edited transcript. Reverting the last segment edit restores the
+     * generated transcript.
+     */
+    suspend fun saveSegmentEdit(
+        memoId: String,
+        segmentId: String,
+        text: String?,
+        effectiveText: String,
+        editedAtMillis: Long = System.currentTimeMillis(),
+    )
+
+    /** Clears the edited copy and every segment edit. */
     suspend fun resetEditedTranscript(memoId: String)
 
     suspend fun createTranscriptionJob(
@@ -196,24 +211,19 @@ class RoomMemoRepository(
                     val transcriptChunkJob = selectTranscriptChunkJob(
                         aggregate.transcriptionJobs,
                     )
-                    if (transcriptChunkJob == null) {
-                        flowOf(
-                            MemoDetail(
-                                memo = aggregate.memo,
-                                transcript = aggregate.transcripts.singleOrNull(),
-                                latestJob = latestJob,
-                                chunks = emptyList(),
-                            ),
-                        )
+                    val chunks = if (transcriptChunkJob == null) {
+                        flowOf(emptyList())
                     } else {
-                        dao.observeTranscriptChunks(transcriptChunkJob.id).map { chunks ->
-                            MemoDetail(
-                                memo = aggregate.memo,
-                                transcript = aggregate.transcripts.singleOrNull(),
-                                latestJob = latestJob,
-                                chunks = chunks,
-                            )
-                        }
+                        dao.observeTranscriptChunks(transcriptChunkJob.id)
+                    }
+                    combine(chunks, dao.observeSegmentEdits(memoId)) { chunks, edits ->
+                        MemoDetail(
+                            memo = aggregate.memo,
+                            transcript = aggregate.transcripts.singleOrNull(),
+                            latestJob = latestJob,
+                            chunks = chunks,
+                            segmentEdits = edits,
+                        )
                     }
                 }
             }
@@ -411,9 +421,51 @@ class RoomMemoRepository(
         }
     }
 
+    override suspend fun saveSegmentEdit(
+        memoId: String,
+        segmentId: String,
+        text: String?,
+        effectiveText: String,
+        editedAtMillis: Long,
+    ) {
+        database.withTransaction {
+            val memo = requireMemo(memoId)
+            if (text == null) {
+                dao.deleteSegmentEdit(memoId, segmentId)
+            } else {
+                dao.upsertSegmentEdit(
+                    TranscriptSegmentEdit(
+                        memoId = memoId,
+                        segmentId = segmentId,
+                        text = text,
+                        editedAtMillis = editedAtMillis,
+                    ),
+                )
+            }
+            val hasEdits = dao.countSegmentEdits(memoId) > 0
+            val current = dao.getTranscript(memoId)
+            val updated = TranscriptRecord(
+                memoId = memoId,
+                generatedText = current?.generatedText,
+                editedText = effectiveText.takeIf { hasEdits },
+                detectedLanguage = current?.detectedLanguage,
+                generatedAtMillis = current?.generatedAtMillis,
+                editedAtMillis = editedAtMillis.takeIf { hasEdits },
+                generatedRevision = current?.generatedRevision ?: 0,
+            )
+            dao.upsertTranscript(updated)
+            dao.updateMemo(memo.copy(updatedAtMillis = editedAtMillis))
+            dao.replaceSearchEntry(
+                memo = memo.copy(updatedAtMillis = editedAtMillis),
+                transcript = updated,
+            )
+        }
+    }
+
     override suspend fun resetEditedTranscript(memoId: String) {
         database.withTransaction {
             val memo = requireMemo(memoId)
+            dao.deleteSegmentEdits(memoId)
             val current = dao.getTranscript(memoId) ?: return@withTransaction
             val updatedAt = System.currentTimeMillis()
             val updated = current.copy(

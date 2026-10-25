@@ -163,6 +163,23 @@ interface VoiceMemoDao {
     @Upsert
     suspend fun upsertTranscript(transcript: TranscriptRecord)
 
+    @Query("SELECT * FROM transcript_segment_edits WHERE memoId = :memoId")
+    fun observeSegmentEdits(memoId: String): Flow<List<TranscriptSegmentEdit>>
+
+    @Query("SELECT COUNT(*) FROM transcript_segment_edits WHERE memoId = :memoId")
+    suspend fun countSegmentEdits(memoId: String): Int
+
+    @Upsert
+    suspend fun upsertSegmentEdit(edit: TranscriptSegmentEdit)
+
+    @Query(
+        "DELETE FROM transcript_segment_edits WHERE memoId = :memoId AND segmentId = :segmentId",
+    )
+    suspend fun deleteSegmentEdit(memoId: String, segmentId: String)
+
+    @Query("DELETE FROM transcript_segment_edits WHERE memoId = :memoId")
+    suspend fun deleteSegmentEdits(memoId: String)
+
     @Query("DELETE FROM memo_search_fts WHERE memoId = :memoId")
     suspend fun deleteSearchEntry(memoId: String)
 

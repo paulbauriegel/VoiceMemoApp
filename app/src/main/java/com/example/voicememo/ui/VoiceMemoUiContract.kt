@@ -141,10 +141,18 @@ data class TranscriptDetailUi(
     val statusLabel: String = "Ready to transcribe locally",
     val text: String = "",
     val segments: List<TranscriptSegmentUi> = emptyList(),
-    val draft: String = text,
-    val isEditing: Boolean = false,
+    /** Segment currently open in the in-place editor, if any. */
+    val editingSegmentId: String? = null,
+    val segmentDraft: String = "",
     val isEdited: Boolean = false,
+    /**
+     * True for transcripts edited as one plain text before segment editing
+     * existed. Their timestamps can't be matched to the edit, so they are hidden.
+     */
+    val isPlainTextEdit: Boolean = false,
     val selectedLanguageCode: String = "auto",
+    /** Compact language note for the transcript header, e.g. "English · auto". */
+    val languageLabel: String? = null,
     val languages: List<LanguageUi> = defaultLanguages,
     val errorMessage: String? = null,
     val timingLabel: String? = null,
@@ -159,6 +167,7 @@ data class TranscriptSegmentUi(
     val startLabel: String,
     val endLabel: String,
     val text: String,
+    val isEdited: Boolean = false,
 )
 
 data class LanguageUi(
@@ -293,10 +302,14 @@ sealed interface VoiceMemoUiAction {
     object RequestTranscription : VoiceMemoUiAction
     object RetryTranscription : VoiceMemoUiAction
     object CancelTranscription : VoiceMemoUiAction
-    object BeginTranscriptEdit : VoiceMemoUiAction
-    data class TranscriptDraftChanged(val text: String) : VoiceMemoUiAction
-    object SaveTranscript : VoiceMemoUiAction
-    object CancelTranscriptEdit : VoiceMemoUiAction
+    /** Sets the language and starts a new transcription, discarding any edits. */
+    data class TranscribeAgain(val languageCode: String) : VoiceMemoUiAction
+    data class DetailSeekToMillis(val positionMillis: Long) : VoiceMemoUiAction
+    data class BeginSegmentEdit(val segmentId: String) : VoiceMemoUiAction
+    data class SegmentDraftChanged(val text: String) : VoiceMemoUiAction
+    object SaveSegmentEdit : VoiceMemoUiAction
+    object CancelSegmentEdit : VoiceMemoUiAction
+    data class RevertSegment(val segmentId: String) : VoiceMemoUiAction
     object ResetEditedTranscript : VoiceMemoUiAction
 }
 

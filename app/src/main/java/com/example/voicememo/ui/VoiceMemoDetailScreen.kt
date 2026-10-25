@@ -2,6 +2,38 @@
 
 package com.example.voicememo.ui
 
+import android.content.ClipData
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.RadioButton
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import com.example.voicememo.data.TranscriptMatch
+import com.example.voicememo.data.TranscriptSearch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -17,7 +49,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -39,7 +70,6 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -611,26 +641,17 @@ private fun TranscriptDetails(
     var transcriptPanelExpanded by rememberSaveable(detail.id) {
         mutableStateOf(true)
     }
-    val busy = transcript.phase in setOf(
-        TranscriptionPhase.Queued,
-        TranscriptionPhase.Preparing,
-        TranscriptionPhase.Transcribing,
-        TranscriptionPhase.Finalizing,
-    )
+    var languageSheetOpen by rememberSaveable(detail.id) {
+        mutableStateOf(false)
+    }
+    val selectedLanguage = transcript.languages
+        .firstOrNull { it.code == transcript.selectedLanguageCode }
+        ?: LanguageUi(transcript.selectedLanguageCode, transcript.selectedLanguageCode)
 
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        LanguageChooser(
-            selectedCode = transcript.selectedLanguageCode,
-            languages = transcript.languages,
-            enabled = !busy && !transcript.isEditing,
-            onSelected = {
-                onAction(VoiceMemoUiAction.TranscriptLanguageChanged(it))
-            },
-        )
-
         when (transcript.phase) {
             TranscriptionPhase.NotRequested -> {
                 Surface(
@@ -650,15 +671,32 @@ private fun TranscriptDetails(
                             text = "Whisper runs on this device. The recording is not uploaded.",
                             style = MaterialTheme.typography.bodyLarge,
                         )
-                        Button(
-                            onClick = {
-                                onAction(VoiceMemoUiAction.RequestTranscription)
-                            },
-                            modifier = Modifier
-                                .heightIn(min = 48.dp)
-                                .testTag("transcribe_button"),
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("Transcribe")
+                            Button(
+                                onClick = {
+                                    onAction(VoiceMemoUiAction.RequestTranscription)
+                                },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("transcribe_button"),
+                            ) {
+                                Text("Transcribe")
+                            }
+                            TextButton(
+                                onClick = { languageSheetOpen = true },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("transcript_language_button"),
+                            ) {
+                                Text(selectedLanguage.label)
+                                Icon(
+                                    imageVector = Icons.Rounded.ExpandMore,
+                                    contentDescription = null,
+                                )
+                            }
                         }
                     }
                 }
@@ -711,17 +749,22 @@ private fun TranscriptDetails(
                                 ?: "The audio is safe. Try transcription again.",
                             style = MaterialTheme.typography.bodyLarge,
                         )
-                        FilledTonalButton(
-                            onClick = {
-                                onAction(VoiceMemoUiAction.RetryTranscription)
-                            },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Refresh,
-                                contentDescription = null,
-                            )
-                            Spacer(Modifier.size(8.dp))
-                            Text("Retry")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledTonalButton(
+                                onClick = {
+                                    onAction(VoiceMemoUiAction.RetryTranscription)
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.size(8.dp))
+                                Text("Retry")
+                            }
+                            TextButton(onClick = { languageSheetOpen = true }) {
+                                Text("Change language")
+                            }
                         }
                     }
                 }
@@ -740,92 +783,47 @@ private fun TranscriptDetails(
                         modifier = Modifier.testTag("transcription_summary"),
                     )
                 }
-                if (transcript.isEditing) {
-                    OutlinedTextField(
-                        value = transcript.draft,
-                        onValueChange = {
-                            onAction(VoiceMemoUiAction.TranscriptDraftChanged(it))
-                        },
-                        modifier = Modifier
+                TranscriptFocusPanel(
+                    detail = detail,
+                    transcript = transcript,
+                    largeText = largeText,
+                    expanded = transcriptPanelExpanded,
+                    onExpandedChange = { transcriptPanelExpanded = it },
+                    onTranscribeAgain = { languageSheetOpen = true },
+                    onAction = onAction,
+                    modifier = if (transcriptPanelExpanded) {
+                        Modifier
                             .fillMaxWidth()
                             .weight(1f)
-                            .testTag("transcript_editor"),
-                        label = { Text("Transcript") },
-                    )
-                    SaveCancelActions(
-                        stackVertically = largeText,
-                        saveEnabled = true,
-                        onCancel = {
-                            onAction(VoiceMemoUiAction.CancelTranscriptEdit)
-                        },
-                        onSave = {
-                            onAction(VoiceMemoUiAction.SaveTranscript)
-                        },
-                    )
-                } else {
-                    TranscriptFocusPanel(
-                        detail = detail,
-                        transcript = transcript,
-                        expanded = transcriptPanelExpanded,
-                        onExpandedChange = { transcriptPanelExpanded = it },
-                        onAction = onAction,
-                        modifier = if (transcriptPanelExpanded) {
-                            Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
-                        } else {
-                            Modifier.fillMaxWidth()
-                        },
-                    )
-                    if (largeText) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            TranscriptEditButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onAction = onAction,
-                            )
-                            RetranscribeButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onAction = onAction,
-                            )
-                            if (transcript.isEdited) {
-                                ResetTranscriptButton(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    onAction = onAction,
-                                )
-                            }
-                        }
                     } else {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                TranscriptEditButton(
-                                    modifier = Modifier.weight(1f),
-                                    onAction = onAction,
-                                )
-                                RetranscribeButton(
-                                    modifier = Modifier.weight(1f),
-                                    onAction = onAction,
-                                )
-                            }
-                            if (transcript.isEdited) {
-                                ResetTranscriptButton(
-                                    modifier = Modifier.align(Alignment.End),
-                                    onAction = onAction,
-                                )
-                            }
-                        }
-                    }
-                }
+                        Modifier.fillMaxWidth()
+                    },
+                )
             }
         }
+    }
+
+    if (languageSheetOpen) {
+        TranscribeSheet(
+            title = if (transcript.phase == TranscriptionPhase.NotRequested) {
+                "Transcription language"
+            } else {
+                "Transcribe again"
+            },
+            confirmLabel = if (transcript.phase == TranscriptionPhase.NotRequested) {
+                "Transcribe"
+            } else {
+                "Transcribe again"
+            },
+            selectedCode = transcript.selectedLanguageCode,
+            languages = transcript.languages,
+            replacesEdits = transcript.isEdited,
+            onDismiss = { languageSheetOpen = false },
+            onConfirm = { code ->
+                languageSheetOpen = false
+                onAction(VoiceMemoUiAction.TranscribeAgain(code))
+            },
+        )
     }
 }
 
@@ -833,11 +831,33 @@ private fun TranscriptDetails(
 private fun TranscriptFocusPanel(
     detail: VoiceMemoDetailUi,
     transcript: TranscriptDetailUi,
+    largeText: Boolean,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
+    onTranscribeAgain: () -> Unit,
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var searchActive by rememberSaveable(detail.id) { mutableStateOf(false) }
+    var query by rememberSaveable(detail.id) { mutableStateOf("") }
+    var currentMatch by rememberSaveable(detail.id) { mutableIntStateOf(0) }
+    var editModeRequested by rememberSaveable(detail.id) { mutableStateOf(false) }
+    var searchedQuery by remember(detail.id) { mutableStateOf(query) }
+    LaunchedEffect(query) {
+        delay(SEARCH_DEBOUNCE_MILLIS)
+        searchedQuery = query
+    }
+    val searchTexts = transcript.segments
+        .takeIf { it.isNotEmpty() }
+        ?.map(TranscriptSegmentUi::text)
+        ?: listOf(transcript.text)
+    val matches = remember(searchTexts, searchedQuery, searchActive) {
+        if (searchActive) TranscriptSearch.find(searchTexts, searchedQuery) else emptyList()
+    }
+    LaunchedEffect(matches) { currentMatch = 0 }
+    val canEditSegments = transcript.segments.isNotEmpty()
+    val editMode = editModeRequested && canEditSegments
+
     Surface(
         modifier = modifier.testTag("transcript_focus_panel"),
         shape = MaterialTheme.shapes.extraLarge,
@@ -846,61 +866,311 @@ private fun TranscriptFocusPanel(
         Column(
             modifier = if (expanded) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 20.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Transcript",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary,
+            if (searchActive) {
+                TranscriptSearchBar(
+                    query = query,
+                    onQueryChange = { query = it },
+                    matchCount = matches.size,
+                    currentMatch = currentMatch,
+                    hasQuery = searchedQuery.isNotBlank(),
+                    onPrevious = {
+                        if (matches.isNotEmpty()) {
+                            currentMatch = (currentMatch - 1 + matches.size) % matches.size
+                        }
+                    },
+                    onNext = {
+                        if (matches.isNotEmpty()) {
+                            currentMatch = (currentMatch + 1) % matches.size
+                        }
+                    },
+                    onClose = {
+                        searchActive = false
+                        query = ""
+                    },
                 )
-                FilledTonalButton(
-                    onClick = { onExpandedChange(!expanded) },
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .testTag("transcript_panel_toggle")
-                        .semantics {
-                            contentDescription = if (expanded) {
-                                "Collapse transcript"
-                            } else {
-                                "Expand transcript"
-                            }
-                        },
-                ) {
-                    Text(if (expanded) "Collapse" else "Expand")
-                    Spacer(Modifier.size(8.dp))
-                    Icon(
-                        imageVector = if (expanded) {
-                            Icons.Rounded.ExpandLess
+            } else {
+                TranscriptPanelHeader(
+                    transcript = transcript,
+                    expanded = expanded,
+                    editMode = editMode,
+                    canEditSegments = canEditSegments,
+                    onSearch = {
+                        searchActive = true
+                        editModeRequested = false
+                        onAction(VoiceMemoUiAction.CancelSegmentEdit)
+                        onExpandedChange(true)
+                    },
+                    onEditModeChange = { enabled ->
+                        editModeRequested = enabled
+                        if (enabled) {
+                            onExpandedChange(true)
                         } else {
-                            Icons.Rounded.ExpandMore
-                        },
-                        contentDescription = null,
-                    )
-                }
+                            onAction(VoiceMemoUiAction.CancelSegmentEdit)
+                        }
+                    },
+                    onExpandedChange = onExpandedChange,
+                    onTranscribeAgain = onTranscribeAgain,
+                    onAction = onAction,
+                )
             }
             if (expanded) {
+                if (transcript.isPlainTextEdit) {
+                    PlainTextEditNotice(
+                        onRevert = { onAction(VoiceMemoUiAction.ResetEditedTranscript) },
+                    )
+                }
+                if (editMode) {
+                    Text(
+                        text = "Tap a line to correct it. Timestamps are kept.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 20.dp),
+                    )
+                }
                 TranscriptTextPanel(
                     transcript = transcript,
                     playbackPositionMillis = detail.playbackPositionMillis,
+                    matches = matches,
+                    currentMatch = currentMatch,
+                    editMode = editMode,
+                    largeText = largeText,
+                    onAction = onAction,
                     containerColor = Color.Transparent,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
                 )
-                HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
+                if (transcript.editingSegmentId == null) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    TranscriptPlaybackControl(
+                        detail = detail,
+                        onAction = onAction,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TranscriptPanelHeader(
+    transcript: TranscriptDetailUi,
+    expanded: Boolean,
+    editMode: Boolean,
+    canEditSegments: Boolean,
+    onSearch: () -> Unit,
+    onEditModeChange: (Boolean) -> Unit,
+    onExpandedChange: (Boolean) -> Unit,
+    onTranscribeAgain: () -> Unit,
+    onAction: (VoiceMemoUiAction) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, top = 8.dp, end = 4.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (editMode) "Editing transcript" else "Transcript",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            val subtitle = listOfNotNull(
+                transcript.languageLabel,
+                "Edited".takeIf { transcript.isEdited },
+            ).joinToString(separator = " · ")
+            if (subtitle.isNotEmpty()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("transcript_language_label"),
                 )
-                TranscriptPlaybackControl(
-                    detail = detail,
-                    onAction = onAction,
+            }
+        }
+        if (editMode) {
+            FilledTonalButton(
+                onClick = { onEditModeChange(false) },
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Icon(imageVector = Icons.Rounded.Check, contentDescription = null)
+                Spacer(Modifier.size(8.dp))
+                Text("Done")
+            }
+            return@Row
+        }
+        IconButton(onClick = onSearch, modifier = Modifier.testTag("transcript_search_button")) {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = "Find in transcript",
+            )
+        }
+        if (canEditSegments) {
+            IconButton(
+                onClick = { onEditModeChange(true) },
+                modifier = Modifier.testTag("transcript_edit_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Edit,
+                    contentDescription = "Edit transcript",
                 )
+            }
+        }
+        IconButton(
+            onClick = { onExpandedChange(!expanded) },
+            modifier = Modifier
+                .testTag("transcript_panel_toggle")
+                .semantics {
+                    contentDescription = if (expanded) {
+                        "Collapse transcript"
+                    } else {
+                        "Expand transcript"
+                    }
+                },
+        ) {
+            Icon(
+                imageVector = if (expanded) {
+                    Icons.Rounded.ExpandLess
+                } else {
+                    Icons.Rounded.ExpandMore
+                },
+                contentDescription = null,
+            )
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "More transcript options",
+                )
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Transcribe again…") },
+                    leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onTranscribeAgain()
+                    },
+                    modifier = Modifier.testTag("retranscribe_button"),
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy transcript") },
+                    leadingIcon = { Icon(Icons.Rounded.ContentCopy, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        scope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(ClipData.newPlainText("Transcript", transcript.text)),
+                            )
+                        }
+                    },
+                )
+                if (transcript.isEdited) {
+                    DropdownMenuItem(
+                        text = { Text("Revert all edits") },
+                        leadingIcon = { Icon(Icons.Rounded.Restore, contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            onAction(VoiceMemoUiAction.ResetEditedTranscript)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TranscriptSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    matchCount: Int,
+    currentMatch: Int,
+    hasQuery: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, top = 8.dp, end = 4.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier
+                .weight(1f)
+                .focusRequester(focusRequester)
+                .testTag("transcript_search_field"),
+            placeholder = { Text("Find in transcript") },
+            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+            suffix = {
+                if (hasQuery) {
+                    Text(
+                        text = if (matchCount == 0) {
+                            "0"
+                        } else {
+                            "${currentMatch + 1}/$matchCount"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.testTag("transcript_search_count"),
+                    )
+                }
+            },
+            singleLine = true,
+            shape = MaterialTheme.shapes.extraLarge,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onNext() }),
+        )
+        IconButton(onClick = onPrevious, enabled = matchCount > 0) {
+            Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "Previous match")
+        }
+        IconButton(onClick = onNext, enabled = matchCount > 0) {
+            Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "Next match")
+        }
+        IconButton(onClick = onClose) {
+            Icon(Icons.Rounded.Close, contentDescription = "Close search")
+        }
+    }
+}
+
+@Composable
+private fun PlainTextEditNotice(onRevert: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Column(
+            modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 4.dp),
+        ) {
+            Text(
+                text = "This transcript was edited as plain text, so timestamps are hidden.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(
+                onClick = onRevert,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("Revert to timed transcript")
             }
         }
     }
@@ -910,9 +1180,22 @@ private fun TranscriptFocusPanel(
 private fun TranscriptTextPanel(
     transcript: TranscriptDetailUi,
     playbackPositionMillis: Long,
+    matches: List<TranscriptMatch>,
+    currentMatch: Int,
+    editMode: Boolean,
+    largeText: Boolean,
+    onAction: (VoiceMemoUiAction) -> Unit,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerLow,
     modifier: Modifier = Modifier,
 ) {
+    val matchColor = MaterialTheme.colorScheme.tertiaryContainer
+    val currentMatchColor = MaterialTheme.colorScheme.tertiary
+    val currentMatchContent = MaterialTheme.colorScheme.onTertiary
+    val matchesBySegment = remember(matches) {
+        matches.withIndex().groupBy { it.value.segmentIndex }
+    }
+    val focusedSegment = matches.getOrNull(currentMatch)?.segmentIndex
+
     Surface(
         modifier = modifier.testTag("transcript_text"),
         shape = MaterialTheme.shapes.large,
@@ -920,16 +1203,35 @@ private fun TranscriptTextPanel(
     ) {
         val segments = transcript.segments
         if (segments.isEmpty()) {
+            val scrollState = rememberScrollState()
+            var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+            val text = when {
+                transcript.text.isNotEmpty() -> transcript.text
+                transcript.isEdited -> "Transcript cleared."
+                else -> "No speech detected."
+            }
+            LaunchedEffect(currentMatch, matches, layout) {
+                val range = matches.getOrNull(currentMatch)?.range ?: return@LaunchedEffect
+                val textLayout = layout ?: return@LaunchedEffect
+                if (range.first >= textLayout.layoutInput.text.length) return@LaunchedEffect
+                val line = textLayout.getLineForOffset(range.first)
+                scrollState.animateScrollTo(textLayout.getLineTop(line).toInt())
+            }
             SelectionContainer {
                 Text(
-                    text = when {
-                        transcript.text.isNotEmpty() -> transcript.text
-                        transcript.isEdited -> "Transcript cleared."
-                        else -> "No speech detected."
-                    },
+                    text = highlightMatches(
+                        text = text,
+                        matches = matchesBySegment[0].orEmpty(),
+                        currentMatch = currentMatch,
+                        matchColor = matchColor,
+                        currentMatchColor = currentMatchColor,
+                        currentMatchContent = currentMatchContent,
+                    ),
                     style = MaterialTheme.typography.bodyLarge,
+                    onTextLayout = { layout = it },
                     modifier = Modifier
                         .fillMaxWidth()
+                        .verticalScroll(scrollState)
                         .padding(20.dp),
                 )
             }
@@ -939,37 +1241,97 @@ private fun TranscriptTextPanel(
                 playbackPositionMillis >= segment.startMillis &&
                     playbackPositionMillis < segment.endMillis
             }
+            val followPlayback = matches.isEmpty() && transcript.editingSegmentId == null
 
-            LaunchedEffect(activeIndex) {
-                if (activeIndex >= 0) {
+            LaunchedEffect(activeIndex, followPlayback) {
+                if (followPlayback && activeIndex >= 0) {
                     listState.animateScrollToItem(
                         index = (activeIndex - 1).coerceAtLeast(0),
+                    )
+                }
+            }
+            LaunchedEffect(focusedSegment) {
+                if (focusedSegment != null) {
+                    listState.animateScrollToItem(
+                        index = (focusedSegment - 1).coerceAtLeast(0),
                     )
                 }
             }
 
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .imePadding(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,
                     vertical = 12.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(
+                itemsIndexed(
                     items = segments,
-                    key = { it.id },
-                ) { segment ->
+                    key = { _, segment -> segment.id },
+                ) { index, segment ->
                     val active = playbackPositionMillis >= segment.startMillis &&
                         playbackPositionMillis < segment.endMillis
-                    TranscriptSegmentRow(
-                        segment = segment,
-                        active = active,
-                    )
+                    if (segment.id == transcript.editingSegmentId) {
+                        TranscriptSegmentEditor(
+                            segment = segment,
+                            draft = transcript.segmentDraft,
+                            largeText = largeText,
+                            onAction = onAction,
+                        )
+                    } else {
+                        TranscriptSegmentRow(
+                            segment = segment,
+                            active = active,
+                            text = highlightMatches(
+                                text = segment.text,
+                                matches = matchesBySegment[index].orEmpty(),
+                                currentMatch = currentMatch,
+                                matchColor = matchColor,
+                                currentMatchColor = currentMatchColor,
+                                currentMatchContent = currentMatchContent,
+                            ),
+                            editMode = editMode,
+                            onClick = {
+                                onAction(
+                                    if (editMode) {
+                                        VoiceMemoUiAction.BeginSegmentEdit(segment.id)
+                                    } else {
+                                        VoiceMemoUiAction.DetailSeekToMillis(segment.startMillis)
+                                    },
+                                )
+                            },
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+private fun highlightMatches(
+    text: String,
+    matches: List<IndexedValue<TranscriptMatch>>,
+    currentMatch: Int,
+    matchColor: Color,
+    currentMatchColor: Color,
+    currentMatchContent: Color,
+): AnnotatedString = buildAnnotatedString {
+    append(text)
+    for ((index, match) in matches) {
+        if (match.range.last >= text.length) continue
+        addStyle(
+            style = if (index == currentMatch) {
+                SpanStyle(background = currentMatchColor, color = currentMatchContent)
+            } else {
+                SpanStyle(background = matchColor)
+            },
+            start = match.range.first,
+            end = match.range.last + 1,
+        )
     }
 }
 
@@ -977,22 +1339,33 @@ private fun TranscriptTextPanel(
 private fun TranscriptSegmentRow(
     segment: TranscriptSegmentUi,
     active: Boolean,
+    text: AnnotatedString,
+    editMode: Boolean,
+    onClick: () -> Unit,
 ) {
     val containerColor by animateColorAsState(
-        targetValue = if (active) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            Color.Transparent
+        targetValue = when {
+            active && !editMode -> MaterialTheme.colorScheme.primaryContainer
+            editMode -> MaterialTheme.colorScheme.surfaceContainerHigh
+            else -> Color.Transparent
         },
         label = "segmentContainerColor",
     )
-    val contentColor = if (active) {
+    val contentColor = if (active && !editMode) {
         MaterialTheme.colorScheme.onPrimaryContainer
     } else {
         MaterialTheme.colorScheme.onSurface
     }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics {
+                onClick(
+                    label = if (editMode) "Edit this line" else "Play from ${segment.startLabel}",
+                    action = null,
+                )
+            },
         shape = MaterialTheme.shapes.medium,
         color = containerColor,
         contentColor = contentColor,
@@ -1002,27 +1375,42 @@ private fun TranscriptSegmentRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.Top,
         ) {
-            Text(
-                text = segment.startLabel,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (active) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+            Column(
                 modifier = Modifier.width(48.dp),
-            )
-            SelectionContainer(
-                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = segment.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                    text = segment.startLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (active) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
+                if (segment.isEdited) {
+                    Text(
+                        text = "edited",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
             }
-            if (active) {
-                Icon(
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (active && !editMode) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.weight(1f),
+            )
+            when {
+                editMode -> Icon(
+                    imageVector = Icons.Rounded.Edit,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                active -> Icon(
                     imageVector = Icons.Rounded.GraphicEq,
                     contentDescription = "Currently playing",
                     modifier = Modifier.size(24.dp),
@@ -1034,50 +1422,134 @@ private fun TranscriptSegmentRow(
 }
 
 @Composable
-private fun LanguageChooser(
+private fun TranscriptSegmentEditor(
+    segment: TranscriptSegmentUi,
+    draft: String,
+    largeText: Boolean,
+    onAction: (VoiceMemoUiAction) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(segment.id) { focusRequester.requestFocus() }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("transcript_segment_editor"),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "${segment.startLabel} – ${segment.endLabel}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { onAction(VoiceMemoUiAction.SegmentDraftChanged(it)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
+                    .testTag("transcript_editor"),
+                textStyle = MaterialTheme.typography.bodyMedium,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = { onAction(VoiceMemoUiAction.DetailSeekToMillis(segment.startMillis)) },
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Play this line",
+                    )
+                }
+                if (segment.isEdited) {
+                    TextButton(
+                        onClick = {
+                            onAction(VoiceMemoUiAction.CancelSegmentEdit)
+                            onAction(VoiceMemoUiAction.RevertSegment(segment.id))
+                        },
+                    ) {
+                        Text(if (largeText) "Revert" else "Revert line")
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { onAction(VoiceMemoUiAction.CancelSegmentEdit) }) {
+                    Text("Cancel")
+                }
+                Button(onClick = { onAction(VoiceMemoUiAction.SaveSegmentEdit) }) {
+                    Text("Save")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TranscribeSheet(
+    title: String,
+    confirmLabel: String,
     selectedCode: String,
     languages: List<LanguageUi>,
-    enabled: Boolean,
-    onSelected: (String) -> Unit,
+    replacesEdits: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    val selected = languages.firstOrNull { it.code == selectedCode }
-        ?: LanguageUi(selectedCode, selectedCode)
-
-    Box {
-        OutlinedButton(
-            onClick = { expanded = true },
-            enabled = enabled,
+    var selected by rememberSaveable(selectedCode) { mutableStateOf(selectedCode) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 48.dp),
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 24.dp)
+                .testTag("transcribe_sheet"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(
-                imageVector = Icons.Rounded.Translate,
-                contentDescription = null,
-            )
-            Spacer(Modifier.size(8.dp))
+            Text(text = title, style = MaterialTheme.typography.titleLarge)
             Text(
-                text = "Language: ${selected.label}",
-                modifier = Modifier.weight(1f),
+                text = "Choose the spoken language. Auto-detect works for most recordings.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Icon(
-                imageVector = Icons.Rounded.ExpandMore,
-                contentDescription = null,
-            )
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            languages.forEach { language ->
-                DropdownMenuItem(
-                    text = { Text(language.label) },
-                    onClick = {
-                        expanded = false
-                        onSelected(language.code)
-                    },
+            Column(modifier = Modifier.selectableGroup()) {
+                languages.forEach { language ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .selectable(
+                                selected = selected == language.code,
+                                onClick = { selected = language.code },
+                                role = Role.RadioButton,
+                            ),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected == language.code, onClick = null)
+                        Text(text = language.label, style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            }
+            if (replacesEdits) {
+                Text(
+                    text = "Your edits will be replaced by the new transcript.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
                 )
+            }
+            Button(
+                onClick = { onConfirm(selected) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("transcribe_sheet_confirm"),
+            ) {
+                Text(confirmLabel)
             }
         }
     }
@@ -1137,58 +1609,4 @@ private fun SaveCancelActions(
     }
 }
 
-@Composable
-private fun TranscriptEditButton(
-    modifier: Modifier,
-    onAction: (VoiceMemoUiAction) -> Unit,
-) {
-    Button(
-        onClick = { onAction(VoiceMemoUiAction.BeginTranscriptEdit) },
-        modifier = modifier.heightIn(min = 48.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Edit,
-            contentDescription = null,
-        )
-        Spacer(Modifier.size(8.dp))
-        Text("Edit")
-    }
-}
-
-@Composable
-private fun RetranscribeButton(
-    modifier: Modifier,
-    onAction: (VoiceMemoUiAction) -> Unit,
-) {
-    OutlinedButton(
-        onClick = { onAction(VoiceMemoUiAction.RetryTranscription) },
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .testTag("retranscribe_button"),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Refresh,
-            contentDescription = null,
-        )
-        Spacer(Modifier.size(8.dp))
-        Text("Transcribe again")
-    }
-}
-
-@Composable
-private fun ResetTranscriptButton(
-    modifier: Modifier,
-    onAction: (VoiceMemoUiAction) -> Unit,
-) {
-    TextButton(
-        onClick = { onAction(VoiceMemoUiAction.ResetEditedTranscript) },
-        modifier = modifier.heightIn(min = 48.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Restore,
-            contentDescription = null,
-        )
-        Spacer(Modifier.size(8.dp))
-        Text("Reset to generated transcript")
-    }
-}
+private const val SEARCH_DEBOUNCE_MILLIS = 150L

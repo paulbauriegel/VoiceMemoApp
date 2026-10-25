@@ -16,8 +16,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TranscriptChunk::class,
         TranscriptionJob::class,
         MemoSearchFts::class,
+        TranscriptSegmentEdit::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -43,6 +44,7 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                     MIGRATION_6_7,
                     MIGRATION_7_8,
                     MIGRATION_8_9,
+                    MIGRATION_9_10,
                 )
                 .build()
 
@@ -153,6 +155,24 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE `transcription_jobs` " +
                         "ADD COLUMN `maximumThermalStatus` INTEGER",
+                )
+            }
+        }
+
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `transcript_segment_edits` (
+                        `memoId` TEXT NOT NULL,
+                        `segmentId` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `editedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`memoId`, `segmentId`),
+                        FOREIGN KEY(`memoId`) REFERENCES `memos`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
                 )
             }
         }

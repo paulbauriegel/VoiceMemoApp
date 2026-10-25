@@ -151,6 +151,31 @@ data class TranscriptRecord(
         get() = editedText ?: generatedText.orEmpty()
 }
 
+/**
+ * A user correction for one timed transcript segment. [segmentId] is the
+ * presentation id derived from the chunk job, so edits belong to the
+ * transcription they were made against. The joined effective text is mirrored
+ * into [TranscriptRecord.editedText] so search and sharing keep working.
+ */
+@Entity(
+    tableName = "transcript_segment_edits",
+    primaryKeys = ["memoId", "segmentId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = MemoRecord::class,
+            parentColumns = ["id"],
+            childColumns = ["memoId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class TranscriptSegmentEdit(
+    val memoId: String,
+    val segmentId: String,
+    val text: String,
+    val editedAtMillis: Long,
+)
+
 @Entity(
     tableName = "transcription_jobs",
     foreignKeys = [
@@ -335,6 +360,7 @@ data class MemoDetail(
     val transcript: TranscriptRecord?,
     val latestJob: TranscriptionJob?,
     val chunks: List<TranscriptChunk>,
+    val segmentEdits: List<TranscriptSegmentEdit> = emptyList(),
 ) {
     val effectiveTranscript: String
         get() = transcript?.effectiveText.orEmpty()

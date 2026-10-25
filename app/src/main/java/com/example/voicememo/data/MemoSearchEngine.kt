@@ -11,6 +11,9 @@ import kotlin.math.abs
  * FTS remains the durable index, while this matcher adds behavior SQLite FTS4
  * does not provide: infix matching, typo tolerance, and relevance ranking.
  */
+/** Ordered from strongest to weakest. */
+internal enum class TermMatch { EXACT, PREFIX, SUBSTRING, FUZZY }
+
 internal object MemoSearchEngine {
     private val tokenPattern = Regex("[\\p{L}\\p{N}_]+")
     private val combiningMarks = Regex("\\p{M}+")
@@ -59,13 +62,33 @@ internal object MemoSearchEngine {
             .replace("ð", "d")
             .replace("þ", "th")
 
-    private fun parse(query: String): ParsedQuery? {
-        val normalized = normalize(query.take(MAX_QUERY_CHARACTERS))
-        val terms = tokenPattern
-            .findAll(normalized)
+    /** Normalized query terms, using the same limits as library search. */
+    internal fun queryTerms(query: String): List<String> =
+        tokenPattern
+            .findAll(normalize(query.take(MAX_QUERY_CHARACTERS)))
             .map { it.value }
             .take(MAX_QUERY_TERMS)
             .toList()
+
+    /**
+     * Matches one normalized query term against one normalized token with the
+     * same rules library search uses: exact, prefix, infix, then conservative
+     * typo tolerance.
+     */
+    internal fun matchTerm(term: String, token: String): TermMatch? = when {
+        token == term -> TermMatch.EXACT
+        token.startsWith(term) -> TermMatch.PREFIX
+        (term.length >= MIN_SUBSTRING_LENGTH || containsCjkScript(term)) &&
+            token.contains(term) -> TermMatch.SUBSTRING
+        term.length >= MIN_FUZZY_LENGTH && (
+            isAdjacentTransposition(term, token) ||
+                (term.length > MIN_FUZZY_LENGTH && isSingleInsertionOrDeletion(term, token))
+            ) -> TermMatch.FUZZY
+        else -> null
+    }
+
+    private fun parse(query: String): ParsedQuery? {
+        val terms = queryTerms(query)
         if (terms.isEmpty()) return null
         return ParsedQuery(
             phrase = terms.joinToString(separator = " "),
@@ -149,23 +172,19 @@ internal object MemoSearchEngine {
             fuzzyScore: Int,
         ): Int {
             if (term in tokenSet) return exactScore
-            if (tokens.any { token -> token.startsWith(term) }) return prefixScore
-            if (
-                (term.length >= MIN_SUBSTRING_LENGTH || containsCjkScript(term)) &&
-                tokens.any { token -> token.contains(term) }
-            ) {
-                return substringScore
+            var best: TermMatch? = null
+            for (token in tokens) {
+                val match = matchTerm(term, token) ?: continue
+                if (best == null || match < best) best = match
+                if (best == TermMatch.PREFIX) break
             }
-
-            if (term.length < MIN_FUZZY_LENGTH) return NO_MATCH
-            val hasConservativeTypoMatch = tokens.any { token ->
-                isAdjacentTransposition(term, token) ||
-                    (
-                        term.length > MIN_FUZZY_LENGTH &&
-                            isSingleInsertionOrDeletion(term, token)
-                        )
+            return when (best) {
+                TermMatch.EXACT -> exactScore
+                TermMatch.PREFIX -> prefixScore
+                TermMatch.SUBSTRING -> substringScore
+                TermMatch.FUZZY -> fuzzyScore
+                null -> NO_MATCH
             }
-            return if (hasConservativeTypoMatch) fuzzyScore else NO_MATCH
         }
 
         companion object {
