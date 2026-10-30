@@ -5,6 +5,8 @@ import com.example.voicememo.data.MemoRecord
 import com.example.voicememo.data.MemoSearchFts
 import com.example.voicememo.data.ProjectIcon
 import com.example.voicememo.data.ProjectRecord
+import com.example.voicememo.data.TranscriptVersion
+import com.example.voicememo.data.TranscriptVersionArchive
 import com.example.voicememo.data.TranscriptRecord
 import com.example.voicememo.data.VoiceMemoDatabase
 import com.example.voicememo.data.WaveformState
@@ -93,12 +95,14 @@ internal data class BackupMemoSnapshot(
     val memo: MemoRecord,
     val transcript: TranscriptRecord?,
     val project: ProjectRecord? = null,
+    val versions: List<TranscriptVersion> = emptyList(),
 )
 
 internal data class RestoredMemo(
     val memo: MemoRecord,
     val transcript: TranscriptRecord?,
     val project: ProjectRecord? = null,
+    val versions: List<TranscriptVersion> = emptyList(),
 )
 
 internal interface VoiceMemoBackupStore {
@@ -122,6 +126,11 @@ private class RoomVoiceMemoBackupStore(
                     memo = aggregate.memo,
                     transcript = aggregate.transcripts.singleOrNull(),
                     project = aggregate.memo.projectId?.let(projects::get),
+                    versions = dao.getTranscriptVersions(aggregate.memo.id).map { version ->
+                        if (version.selected) version.copy(
+                            transcript = aggregate.transcripts.singleOrNull() ?: version.transcript,
+                        ) else version
+                    },
                 )
             }
         }
@@ -137,6 +146,7 @@ private class RoomVoiceMemoBackupStore(
             memos.forEach { restored ->
                 dao.insertMemo(restored.memo)
                 restored.transcript?.let { dao.upsertTranscript(it) }
+                restored.versions.forEach { dao.upsertTranscriptVersion(it) }
                 dao.insertSearchEntry(
                     MemoSearchFts(
                         memoId = restored.memo.id,
@@ -173,6 +183,12 @@ internal class DefaultVoiceMemoBackupManager(
                     "This library contains too many memos for one backup."
                 }
                 val prepared = snapshots.map(::prepareExportMemo)
+                require(prepared.sumOf { memo ->
+                    (memo.generatedText?.size?.toLong() ?: 0L) +
+                        (memo.editedText?.size?.toLong() ?: 0L) +
+                        (memo.effectiveText?.size?.toLong() ?: 0L) +
+                        (memo.versions?.size?.toLong() ?: 0L)
+                } <= MAX_TOTAL_TRANSCRIPT_BYTES) { "The backup contains too much transcript text." }
                 onProgress(BackupProgress(BackupPhase.WRITING_ARCHIVE, 0, prepared.size))
 
                 val zip = ZipOutputStream(BufferedOutputStream(output))
@@ -196,6 +212,9 @@ internal class DefaultVoiceMemoBackupManager(
                     }
                     memo.editedText?.let {
                         writeZipBytes(zip, "$base/$EDITED_TRANSCRIPT_FILE", it)
+                    }
+                    memo.versions?.let {
+                        writeZipBytes(zip, "$base/$VERSIONS_FILE", it)
                     }
                     memo.effectiveText?.let {
                         writeZipBytes(zip, "$base/$EFFECTIVE_TRANSCRIPT_FILE", it)
@@ -315,6 +334,10 @@ internal class DefaultVoiceMemoBackupManager(
                         memo = memo,
                         transcript = transcript,
                         project = source.project,
+                        versions = source.versions.map { version -> version.copy(
+                            memoId = destinationId,
+                            transcript = version.transcript.copy(memoId = destinationId),
+                        ) },
                     )
                     onProgress(
                         BackupProgress(
@@ -403,6 +426,11 @@ internal class DefaultVoiceMemoBackupManager(
         val generated = transcript?.generatedText?.toUtf8Bounded()
         val edited = transcript?.editedText?.toUtf8Bounded()
         val effective = transcript?.effectiveText?.toUtf8Bounded()
+        val versions = snapshot.versions.takeIf { it.isNotEmpty() }
+            ?.let(TranscriptVersionArchive::encode)
+        require(versions == null || versions.size <= MAX_TRANSCRIPT_BYTES) {
+            "Transcript history is too large to back up."
+        }
         val metadata = Properties().apply {
             setProperty("id", memo.id)
             setProperty("title", memo.title)
@@ -430,6 +458,10 @@ internal class DefaultVoiceMemoBackupManager(
             waveform?.let {
                 setProperty("waveform.bytes", it.length().toString())
                 setProperty("waveform.sha256", sha256(it))
+            }
+            versions?.let {
+                setProperty("versions.bytes", it.size.toString())
+                setProperty("versions.sha256", sha256(it))
             }
             setProperty("transcript.present", (transcript != null).toString())
             setProperty("generated.present", (generated != null).toString())
@@ -462,6 +494,7 @@ internal class DefaultVoiceMemoBackupManager(
             generatedText = generated,
             editedText = edited,
             effectiveText = effective,
+            versions = versions,
             metadata = metadata,
         )
     }
@@ -731,6 +764,20 @@ internal class DefaultVoiceMemoBackupManager(
             null
         }
 
+        val versionsFile = File(directory, VERSIONS_FILE)
+        val versions = if (metadata.containsKey("versions.bytes")) {
+            verifyFile(versionsFile, metadata.requiredLong("versions.bytes"),
+                metadata.requiredSha256("versions.sha256"), MAX_TRANSCRIPT_BYTES, "transcript history")
+            TranscriptVersionArchive.decode(originalId, versionsFile.readBytes()).also { history ->
+                require(history.firstOrNull { it.selected }?.transcript == transcript) {
+                    "The selected transcript does not match its history."
+                }
+            }
+        } else {
+            require(!versionsFile.exists()) { "Unexpected transcript history." }
+            emptyList()
+        }
+
         return ParsedMemo(
             originalId = originalId,
             title = title,
@@ -748,6 +795,7 @@ internal class DefaultVoiceMemoBackupManager(
             audio = audio,
             waveform = waveform,
             transcript = transcript,
+            versions = versions,
         )
     }
 
@@ -861,6 +909,7 @@ internal class DefaultVoiceMemoBackupManager(
         val generatedText: ByteArray?,
         val editedText: ByteArray?,
         val effectiveText: ByteArray?,
+        val versions: ByteArray?,
         val metadata: Properties,
     )
 
@@ -881,6 +930,7 @@ internal class DefaultVoiceMemoBackupManager(
         val audio: File,
         val waveform: File?,
         val transcript: TranscriptRecord?,
+        val versions: List<TranscriptVersion>,
     )
 }
 
@@ -1194,6 +1244,7 @@ private fun maximumEntryBytes(name: String): Long = when {
     name.endsWith("/$METADATA_FILE") -> MAX_METADATA_BYTES
     name.endsWith("/$AUDIO_FILE") -> MAX_AUDIO_BYTES
     name.endsWith("/$WAVEFORM_FILE") -> MAX_WAVEFORM_BYTES
+    name.endsWith("/$VERSIONS_FILE") ||
     name.endsWith("/$GENERATED_TRANSCRIPT_FILE") ||
         name.endsWith("/$EDITED_TRANSCRIPT_FILE") ||
         name.endsWith("/$EFFECTIVE_TRANSCRIPT_FILE") -> MAX_TRANSCRIPT_BYTES
@@ -1201,6 +1252,7 @@ private fun maximumEntryBytes(name: String): Long = when {
 }
 
 private fun isTranscriptEntry(name: String): Boolean =
+    name.endsWith("/$VERSIONS_FILE") ||
     name.endsWith("/$GENERATED_TRANSCRIPT_FILE") ||
         name.endsWith("/$EDITED_TRANSCRIPT_FILE") ||
         name.endsWith("/$EFFECTIVE_TRANSCRIPT_FILE")
@@ -1209,6 +1261,7 @@ private const val FORMAT_ID = "com.example.voicememo.backup"
 private const val FORMAT_VERSION = 1
 private const val MANIFEST_ENTRY = "voice-memo-backup.properties"
 private const val MEMOS_DIRECTORY = "memos"
+private const val VERSIONS_FILE = "transcript-versions.properties"
 private const val METADATA_FILE = "metadata.properties"
 private const val AUDIO_FILE = "audio.wav"
 private const val WAVEFORM_FILE = "waveform.vwf"
@@ -1217,7 +1270,7 @@ private const val EDITED_TRANSCRIPT_FILE = "edited-transcript.txt"
 private const val EFFECTIVE_TRANSCRIPT_FILE = "transcript.txt"
 private const val PENDING_RESTORE_MARKER = ".voice-memo-restore-pending"
 private const val MAX_MEMOS = 10_000
-private const val MAX_ENTRIES = 60_001
+private const val MAX_ENTRIES = 70_001
 private const val MAX_TITLE_CHARACTERS = 240
 private const val MAX_GENERATED_SUMMARY_CHARACTERS = 220
 private const val MAX_METADATA_MODEL_ID_CHARACTERS = 120
@@ -1251,5 +1304,5 @@ private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
 private val MEMO_ENTRY_PATTERN = Regex(
     "memos/([0-9A-Fa-f-]{36})/" +
         "(metadata\\.properties|audio\\.wav|waveform\\.vwf|" +
-        "generated-transcript\\.txt|edited-transcript\\.txt|transcript\\.txt)",
+        "transcript-versions\\.properties|generated-transcript\\.txt|edited-transcript\\.txt|transcript\\.txt)",
 )

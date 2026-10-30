@@ -135,6 +135,8 @@ enum class TranscriptionPhase {
     Error,
 }
 
+data class TranscriptVersionUi(val id: String, val label: String, val selected: Boolean)
+
 data class TranscriptDetailUi(
     val phase: TranscriptionPhase = TranscriptionPhase.NotRequested,
     val progress: Float? = null,
@@ -158,6 +160,15 @@ data class TranscriptDetailUi(
     val timingLabel: String? = null,
     val thermalStatusLabel: String? = null,
     val realTimeFactorLabel: String? = null,
+    /** Latest semantic find-in-transcript result, if any. */
+    val semanticSearch: SemanticSearchUi? = null,
+    val versions: List<TranscriptVersionUi> = emptyList(),
+)
+
+/** Segments related in meaning to [query], best first. */
+data class SemanticSearchUi(
+    val query: String,
+    val segmentIds: List<String>,
 )
 
 data class TranscriptSegmentUi(
@@ -300,9 +311,11 @@ sealed interface VoiceMemoUiAction {
 
     data class TranscriptLanguageChanged(val languageCode: String) : VoiceMemoUiAction
     object RequestTranscription : VoiceMemoUiAction
+    data class SelectTranscriptVersion(val versionId: String) : VoiceMemoUiAction
+
     object RetryTranscription : VoiceMemoUiAction
     object CancelTranscription : VoiceMemoUiAction
-    /** Sets the language and starts a new transcription, discarding any edits. */
+    /** Sets the language and starts a new version, preserving previous transcripts and edits. */
     data class TranscribeAgain(val languageCode: String) : VoiceMemoUiAction
     data class DetailSeekToMillis(val positionMillis: Long) : VoiceMemoUiAction
     data class BeginSegmentEdit(val segmentId: String) : VoiceMemoUiAction
@@ -310,6 +323,8 @@ sealed interface VoiceMemoUiAction {
     object SaveSegmentEdit : VoiceMemoUiAction
     object CancelSegmentEdit : VoiceMemoUiAction
     data class RevertSegment(val segmentId: String) : VoiceMemoUiAction
+    /** Runs semantic find-in-transcript for the open memo; blank clears it. */
+    data class SearchTranscriptSemantically(val query: String) : VoiceMemoUiAction
     object ResetEditedTranscript : VoiceMemoUiAction
 }
 

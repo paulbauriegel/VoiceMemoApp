@@ -144,6 +144,15 @@ val useFp16Fp32AccumGpuProbe = providers
         value.toBooleanStrictOrNull()
             ?: error("useFp16Fp32AccumGpuProbe must be true or false.")
     }
+// Semantic find-in-transcript (bundled multilingual-e5-small). Disabling it
+// drops the asset and the indexing work, e.g. for A/B benchmark controls.
+val includeSemanticSearch = providers
+    .gradleProperty("includeSemanticSearch")
+    .orElse("true")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeSemanticSearch must be true or false.")
+    }
 val installReleaseLocally = providers
     .gradleProperty("installReleaseLocally")
     .orElse("false")
@@ -306,6 +315,8 @@ val splitWhisperDecoderAssetPath =
     "whisper/whisper_large_v3_turbo_split_decoder.tflite"
 val sileroVadAssetRoot =
     layout.projectDirectory.dir("src/main/generatedVadAssets")
+val embeddingAssetRoot =
+    layout.projectDirectory.dir("src/main/generatedEmbeddingAssets")
 val strictMathGpuProbeAar = rootProject.layout.projectDirectory.file(
     "build/generated/litert-strict-math-probe/litert-2.1.6-strict-math-probe.aar",
 )
@@ -394,6 +405,11 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("int", "WHISPER_WORKER_COUNT", whisperWorkerCount.get().toString())
+        buildConfigField(
+            "boolean",
+            "SEMANTIC_SEARCH_ENABLED",
+            includeSemanticSearch.get().toString(),
+        )
         buildConfigField(
             "int",
             "WHISPER_THREADS_PER_WORKER",
@@ -548,6 +564,9 @@ android {
 
     sourceSets {
         getByName("main").assets.directories.add(sileroVadAssetRoot.asFile.absolutePath)
+        if (includeSemanticSearch.get()) {
+            getByName("main").assets.directories.add(embeddingAssetRoot.asFile.absolutePath)
+        }
         if (useFullFloatDecoderProduction.get() || useSplitWhisperProduction.get()) {
             if (useFullFloatDecoderProduction.get()) {
                 getByName("main").assets.directories.add(
@@ -953,6 +972,58 @@ val verifySileroVadAsset by tasks.registering {
 
 tasks.named("preBuild").configure {
     dependsOn(verifySileroVadAsset)
+}
+
+// multilingual-e5-small (MIT) at intfloat/multilingual-e5-small@614241f6,
+// used by semantic find-in-transcript. Name to (bytes, SHA-256).
+val multilingualE5Assets = mapOf(
+    "multilingual_e5_small_qint8.onnx" to
+        (118_346_824L to "dd476dd0c2514e9b9be83aeb3853fac0763e0bdf4a71645407587d77c48a2d88"),
+    "multilingual_e5_small_sentencepiece.model" to
+        (5_069_051L to "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865"),
+)
+val verifyMultilingualE5Assets by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned offline multilingual-e5-small embedding model."
+    onlyIf { includeSemanticSearch.get() }
+    val assetFiles = multilingualE5Assets.keys.map { embeddingAssetRoot.file("embedding/$it") }
+    inputs.files(assetFiles)
+
+    doLast {
+        multilingualE5Assets.forEach { (name, expected) ->
+            val (expectedBytes, expectedSha256) = expected
+            val assetFile = embeddingAssetRoot.file("embedding/$name").asFile
+            check(assetFile.isFile) {
+                """
+                Offline embedding asset is missing:
+                 - ${assetFile.relativeTo(projectDir)}
+
+                Run scripts/fetch-multilingual-e5-assets.sh, then build again.
+                """.trimIndent()
+            }
+            check(assetFile.length() == expectedBytes) {
+                "$name has ${assetFile.length()} bytes; expected $expectedBytes. " +
+                    "Re-run scripts/fetch-multilingual-e5-assets.sh."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            assetFile.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualSha256 == expectedSha256) {
+                "$name SHA-256 is $actualSha256; expected the pinned multilingual-e5-small file."
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifyMultilingualE5Assets)
 }
 
 val verifyStrictMathGpuProbeAar by tasks.registering {

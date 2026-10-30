@@ -157,6 +157,18 @@ interface VoiceMemoDao {
     @Query("DELETE FROM memos WHERE id IN (:memoIds)")
     suspend fun deleteMemos(memoIds: Collection<String>)
 
+    @Query("SELECT * FROM transcript_versions WHERE memoId = :memoId ORDER BY saved_generatedAtMillis DESC, id")
+    suspend fun getTranscriptVersions(memoId: String): List<TranscriptVersion>
+
+    @Query("SELECT * FROM transcript_versions WHERE memoId = :memoId ORDER BY saved_generatedAtMillis DESC, id")
+    fun observeTranscriptVersions(memoId: String): Flow<List<TranscriptVersion>>
+
+    @Upsert
+    suspend fun upsertTranscriptVersion(version: TranscriptVersion)
+
+    @Query("SELECT * FROM transcript_segment_edits WHERE memoId = :memoId")
+    suspend fun getSegmentEdits(memoId: String): List<TranscriptSegmentEdit>
+
     @Query("SELECT * FROM transcripts WHERE memoId = :memoId LIMIT 1")
     suspend fun getTranscript(memoId: String): TranscriptRecord?
 
@@ -179,6 +191,18 @@ interface VoiceMemoDao {
 
     @Query("DELETE FROM transcript_segment_edits WHERE memoId = :memoId")
     suspend fun deleteSegmentEdits(memoId: String)
+
+    @Query("SELECT * FROM transcript_segment_embeddings WHERE memoId = :memoId")
+    suspend fun getSegmentEmbeddings(memoId: String): List<TranscriptSegmentEmbedding>
+
+    @Upsert
+    suspend fun upsertSegmentEmbeddings(embeddings: List<TranscriptSegmentEmbedding>)
+
+    @Query(
+        "DELETE FROM transcript_segment_embeddings " +
+            "WHERE memoId = :memoId AND segmentId IN (:segmentIds)",
+    )
+    suspend fun deleteSegmentEmbeddings(memoId: String, segmentIds: Collection<String>)
 
     @Query("DELETE FROM memo_search_fts WHERE memoId = :memoId")
     suspend fun deleteSearchEntry(memoId: String)

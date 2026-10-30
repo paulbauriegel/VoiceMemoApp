@@ -176,6 +176,33 @@ data class TranscriptSegmentEdit(
     val editedAtMillis: Long,
 )
 
+/**
+ * Sentence embedding of one timed segment for semantic find-in-transcript.
+ * Derived data: [textSha256] and [modelId] identify what was embedded, so a
+ * segment edit or a model change makes the row stale and it is re-embedded.
+ * [vector] holds little-endian float32 values.
+ */
+@Entity(
+    tableName = "transcript_segment_embeddings",
+    primaryKeys = ["memoId", "segmentId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = MemoRecord::class,
+            parentColumns = ["id"],
+            childColumns = ["memoId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+class TranscriptSegmentEmbedding(
+    val memoId: String,
+    val segmentId: String,
+    val textSha256: String,
+    val modelId: String,
+    val vector: ByteArray,
+    val embeddedAtMillis: Long,
+)
+
 @Entity(
     tableName = "transcription_jobs",
     foreignKeys = [
@@ -361,6 +388,8 @@ data class MemoDetail(
     val latestJob: TranscriptionJob?,
     val chunks: List<TranscriptChunk>,
     val segmentEdits: List<TranscriptSegmentEdit> = emptyList(),
+    val versions: List<TranscriptVersion> = emptyList(),
+    val selectedJob: TranscriptionJob? = null,
 ) {
     val effectiveTranscript: String
         get() = transcript?.effectiveText.orEmpty()

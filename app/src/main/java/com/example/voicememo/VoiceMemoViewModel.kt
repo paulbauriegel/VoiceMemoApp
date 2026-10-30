@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,7 +17,10 @@ import com.example.voicememo.data.ProjectSummary
 import com.example.voicememo.data.TranscriptionJob
 import com.example.voicememo.data.TranscriptionJobStatus
 import com.example.voicememo.data.TranscriptChunk
-import com.example.voicememo.data.TranscriptSegmentEdit
+import com.example.voicememo.data.SemanticHit
+import com.example.voicememo.data.SemanticTranscriptRanking
+import com.example.voicememo.data.TimedTranscriptSegment
+import com.example.voicememo.data.TranscriptSegments
 import com.example.voicememo.data.TranscriptSource
 import com.example.voicememo.playback.PlaybackState
 import com.example.voicememo.recording.RecordingState
@@ -25,6 +29,7 @@ import com.example.voicememo.recording.WaveformSidecar
 import com.example.voicememo.sharing.ShareContent
 import com.example.voicememo.sharing.ShareableMemo
 import com.example.voicememo.settings.AppearanceMode
+import com.example.voicememo.embedding.MultilingualE5Embedder
 import com.example.voicememo.ui.DetailSection
 import com.example.voicememo.ui.LicenseUi
 import com.example.voicememo.ui.LibraryTab
@@ -36,6 +41,7 @@ import com.example.voicememo.ui.ProjectListItemUi
 import com.example.voicememo.ui.RecorderPhase
 import com.example.voicememo.ui.RecorderUiState
 import com.example.voicememo.ui.SharePayload
+import com.example.voicememo.ui.SemanticSearchUi
 import com.example.voicememo.ui.TranscriptSegmentUi
 import com.example.voicememo.ui.TranscriptDetailUi
 import com.example.voicememo.ui.TranscriptionPhase
@@ -59,6 +65,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -109,6 +116,7 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.transcriptionModelId,
         ),
     )
+    private var semanticSearchJob: Job? = null
     private val waveformCache = ConcurrentHashMap<WaveformCacheKey, List<Float>>()
     private val mutableEffects = MutableSharedFlow<VoiceMemoUiEffect>(extraBufferCapacity = 8)
     val effects = mutableEffects.asSharedFlow()
@@ -178,6 +186,15 @@ class VoiceMemoViewModel(
                     .bufferedReader()
                     .use { it.readText() },
                 sourceUrl = "https://github.com/snakers4/silero-vad",
+            ),
+            LicenseUi(
+                name = "multilingual-e5-small",
+                version = MultilingualE5Embedder.MODEL_REVISION.take(8),
+                licenseName = "MIT License",
+                notice = resources.openRawResource(R.raw.multilingual_e5_mit)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://huggingface.co/intfloat/multilingual-e5-small",
             ),
             LicenseUi(
                 name = "Microsoft ONNX Runtime",
@@ -724,6 +741,18 @@ class VoiceMemoViewModel(
             VoiceMemoUiAction.RetryTranscription,
             -> requestTranscription()
 
+            is VoiceMemoUiAction.SelectTranscriptVersion -> {
+                val memoId = presentation.value.selectedMemoId
+                semanticSearchJob?.cancel()
+                if (memoId != null) viewModelScope.launch {
+                    runCatching { repository.selectTranscriptVersion(memoId, action.versionId) }
+                        .onSuccess { presentation.update { it.copy(
+                            editingSegmentId = null, segmentDraft = null, semanticSearch = null,
+                        ) } }
+                        .onFailure { mutableEffects.emitMessage(it.message ?: "Could not select transcript.") }
+                }
+            }
+
             is VoiceMemoUiAction.TranscribeAgain -> transcribeAgain(action.languageCode)
 
             VoiceMemoUiAction.CancelTranscription -> cancelTranscription()
@@ -746,6 +775,8 @@ class VoiceMemoViewModel(
             }
 
             is VoiceMemoUiAction.RevertSegment -> updateSegment(action.segmentId, text = null)
+            is VoiceMemoUiAction.SearchTranscriptSemantically ->
+                searchTranscriptSemantically(action.query)
 
             VoiceMemoUiAction.ResetEditedTranscript -> resetEditedTranscript()
         }
@@ -1053,7 +1084,6 @@ class VoiceMemoViewModel(
 
     private fun transcribeAgain(languageCode: String) {
         val memoId = presentation.value.selectedMemoId ?: return
-        val discardEdits = uiState.value.detail?.transcript?.isEdited == true
         presentation.update { it.copy(editingSegmentId = null, segmentDraft = null) }
         viewModelScope.launch {
             runCatching {
@@ -1061,8 +1091,6 @@ class VoiceMemoViewModel(
                     memoId,
                     languageCode.takeUnless { it == "auto" },
                 )
-                // Segment edits are tied to the old transcription's timing.
-                if (discardEdits) repository.resetEditedTranscript(memoId)
             }.onSuccess {
                 requestTranscription(languageCode)
             }.onFailure {
@@ -1143,6 +1171,41 @@ class VoiceMemoViewModel(
                 repository.saveSegmentEdit(memoId, segmentId, storedText, effectiveText)
             }.onFailure {
                 mutableEffects.emitMessage(it.message ?: "The transcript could not be saved.")
+            }
+        }
+    }
+
+    private fun searchTranscriptSemantically(query: String) {
+        semanticSearchJob?.cancel()
+        val memoId = presentation.value.selectedMemoId
+        if (
+            !BuildConfig.SEMANTIC_SEARCH_ENABLED ||
+            memoId == null ||
+            query.trim().length < SemanticTranscriptRanking.MIN_QUERY_LENGTH
+        ) {
+            presentation.update { it.copy(semanticSearch = null) }
+            return
+        }
+        semanticSearchJob = viewModelScope.launch {
+            try {
+                val detail = repository.observeMemo(memoId).firstValue() ?: return@launch
+                val segments = withContext(Dispatchers.Default) {
+                    TranscriptSegments.timed(detail, transcriptTokenizer)
+                }
+                val hits = container.semanticTranscriptIndex.search(memoId, segments, query)
+                presentation.update {
+                    it.copy(
+                        semanticSearch = SemanticSearchState(
+                            memoId = memoId,
+                            result = SemanticSearchUi(query, hits.map(SemanticHit::segmentId)),
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                // Fuzzy matches still work; semantic search is an addition.
+                Log.w("VoiceMemoViewModel", "Semantic transcript search failed.", failure)
             }
         }
     }
@@ -1346,22 +1409,24 @@ class VoiceMemoViewModel(
         } else {
             effectiveTranscript
         }
-        val transcriptState = transcriptionDetail(latestJob, displayTranscript)
+        val displayJob = latestJob?.takeUnless { it.status == TranscriptionJobStatus.SUCCEEDED }
+            ?: selectedJob ?: latestJob
+        val transcriptState = transcriptionDetail(displayJob, displayTranscript)
         val timingLabel = transcriptionTimingLabel(
             enabled = local.transcriptionTimingEnabled,
             phase = transcriptState.phase,
-            transcriptionElapsedMillis = latestJob?.transcriptionElapsedMillis,
+            transcriptionElapsedMillis = displayJob?.transcriptionElapsedMillis,
             segmentInferenceMillis = chunks.mapNotNull(TranscriptChunk::inferenceMillis),
         )
         val thermalStatusLabel = transcriptionThermalStatusLabel(
             enabled = local.transcriptionTimingEnabled,
             phase = transcriptState.phase,
-            maximumThermalStatus = latestJob?.maximumThermalStatus,
+            maximumThermalStatus = displayJob?.maximumThermalStatus,
         )
         val realTimeFactorLabel = transcriptionRealTimeFactorLabel(
             enabled = local.transcriptionTimingEnabled,
             phase = transcriptState.phase,
-            transcriptionElapsedMillis = latestJob?.transcriptionElapsedMillis,
+            transcriptionElapsedMillis = displayJob?.transcriptionElapsedMillis,
             segmentInferenceMillis = chunks.mapNotNull(TranscriptChunk::inferenceMillis),
             audioDurationMillis = memo.durationMillis,
         )
@@ -1396,7 +1461,21 @@ class VoiceMemoViewModel(
             isGeneratingMetadata = latestJob.isGeneratingRecordingMetadata(),
             selectedSection = local.detailSection,
             transcript = transcriptState.copy(
+                versions = versions.mapIndexed { index, version ->
+                    com.example.voicememo.ui.TranscriptVersionUi(
+                        version.id,
+                        "Version ${versions.size - index} · ${version.modelId?.let { id ->
+                            com.example.voicememo.transcription.TranscriptionModel.entries
+                                .firstOrNull { it.id == id }?.displayName ?: id
+                        } ?: "Saved transcript"}" +
+                            (version.transcript.generatedAtMillis?.let { " · ${dateFormat.format(Date(it))}" } ?: ""),
+                        version.selected,
+                    )
+                },
                 editingSegmentId = local.editingSegmentId,
+                semanticSearch = local.semanticSearch
+                    ?.takeIf { it.memoId == memo.id }
+                    ?.result,
                 segmentDraft = local.segmentDraft.orEmpty(),
                 selectedLanguageCode = memo.languageOverride ?: "auto",
                 languageLabel = transcriptLanguageLabel(
@@ -1628,6 +1707,7 @@ class VoiceMemoViewModel(
         val titleEditing: Boolean = false,
         val editingSegmentId: String? = null,
         val segmentDraft: String? = null,
+        val semanticSearch: SemanticSearchState? = null,
         val pendingDelete: PendingDeleteUi? = null,
         val pendingShare: PendingShareUi? = null,
         val pendingProjectDeleteId: String? = null,
@@ -1647,6 +1727,11 @@ class VoiceMemoViewModel(
                 isBackupRestorePickerOpen
     }
 
+    private data class SemanticSearchState(
+        val memoId: String,
+        val result: SemanticSearchUi,
+    )
+
     private data class WaveformCacheKey(
         val path: String,
         val maximumBuckets: Int,
@@ -1665,31 +1750,30 @@ class VoiceMemoViewModel(
     private companion object {
         const val LIBRARY_WAVEFORM_BUCKETS = 160
         const val DETAIL_WAVEFORM_BUCKETS = 260
-        const val CHUNK_OVERLAP_MILLIS = 2_000L
     }
 
     private fun MemoDetail.generatedSegments(): List<TranscriptSegmentUi> =
-        chunks
-            .filter { it.rawText.isNotBlank() }
-            .sortedBy { it.chunkIndex }
-            .flatMap { chunk -> chunk.toTranscriptSegments() }
+        TranscriptSegments.generated(this, transcriptTokenizer).map { it.toUi() }
 
-    private fun MemoDetail.isPlainTextEdit(): Boolean =
-        transcript?.editedText != null && segmentEdits.isEmpty()
+    private fun MemoDetail.isPlainTextEdit(): Boolean = TranscriptSegments.isPlainTextEdit(this)
 
     /**
      * Generated segments with the user's corrections applied. Plain-text edits
      * from before segment editing can't be aligned, so they have no segments.
      */
-    private fun MemoDetail.timedSegments(): List<TranscriptSegmentUi> {
-        if (isPlainTextEdit()) return emptyList()
-        val edits = segmentEdits.associateBy(TranscriptSegmentEdit::segmentId)
-        return generatedSegments().map { segment ->
-            edits[segment.id]
-                ?.let { segment.copy(text = it.text, isEdited = true) }
-                ?: segment
-        }
-    }
+    private fun MemoDetail.timedSegments(): List<TranscriptSegmentUi> =
+        TranscriptSegments.timed(this, transcriptTokenizer).map { it.toUi() }
+
+    private fun TimedTranscriptSegment.toUi(): TranscriptSegmentUi =
+        TranscriptSegmentUi(
+            id = id,
+            startMillis = startMillis,
+            endMillis = endMillis,
+            startLabel = formatDuration(startMillis),
+            endLabel = formatDuration(endMillis),
+            text = text,
+            isEdited = isEdited,
+        )
 
     private fun transcriptLanguageLabel(override: String?, detected: String?): String? {
         fun label(code: String) = defaultLanguages.firstOrNull { it.code == code }?.label
@@ -1700,54 +1784,6 @@ class VoiceMemoViewModel(
             else -> null
         }
     }
-
-    private fun TranscriptChunk.toTranscriptSegments(): List<TranscriptSegmentUi> {
-        val timestampBegin = WhisperTimestampTokens.DEFAULT_TIMESTAMP_BEGIN_TOKEN_ID
-        if (!WhisperTimestampTokens.containsTimestamp(tokenIds, timestampBegin)) {
-            return listOf(coarseTranscriptSegment())
-        }
-        val chunkDuration = (windowEndMillis - windowStartMillis).coerceAtLeast(0L)
-        val parsed = WhisperTimestampTokens.parseSegments(
-            tokens = tokenIds,
-            timestampBeginTokenId = timestampBegin,
-            tokenizer = transcriptTokenizer,
-            audioDurationMillis = chunkDuration,
-        )
-        if (parsed.isEmpty()) return listOf(coarseTranscriptSegment())
-
-        val overlapBoundary = if (chunkIndex == 0) 0L else CHUNK_OVERLAP_MILLIS
-        return parsed.mapIndexedNotNull { segmentIndex, segment ->
-            if (segment.endMillis <= overlapBoundary) {
-                null
-            } else {
-                val startMillis =
-                    windowStartMillis + maxOf(segment.startMillis, overlapBoundary)
-                val endMillis = windowStartMillis + segment.endMillis
-                if (endMillis <= startMillis || segment.text.isBlank()) {
-                    null
-                } else {
-                    TranscriptSegmentUi(
-                        id = "$jobId:$chunkIndex:$segmentIndex",
-                        startMillis = startMillis,
-                        endMillis = endMillis,
-                        startLabel = formatDuration(startMillis),
-                        endLabel = formatDuration(endMillis),
-                        text = segment.text,
-                    )
-                }
-            }
-        }.ifEmpty { listOf(coarseTranscriptSegment()) }
-    }
-
-    private fun TranscriptChunk.coarseTranscriptSegment(): TranscriptSegmentUi =
-        TranscriptSegmentUi(
-            id = "$jobId:$chunkIndex",
-            startMillis = windowStartMillis,
-            endMillis = windowEndMillis,
-            startLabel = formatDuration(windowStartMillis),
-            endLabel = formatDuration(windowEndMillis),
-            text = WhisperTimestampTokens.withoutTimestampMarkers(rawText),
-        )
 
     private fun formatDuration(millis: Long): String {
         val totalSeconds = millis.coerceAtLeast(0L) / 1_000L

@@ -1,0 +1,83 @@
+# Generated from Hugging Face tokenizers with intfloat/multilingual-e5-small@614241f6 tokenizer.json.
+"query: Wo ist der Schlüssel?"	0 41 1294 12 13787 443 122 159452 32 2
+"passage: Ich habe gestern über die Präsentation gesprochen."	0 46692 12 2484 3260 139263 1659 68 213104 218557 5 2
+"¿Dónde está la estación de tren? Mañana a las 8:30."	0 3936 397 5800 112 1570 21 131173 8 7497 32 911 5708 76 10 576 382 12 1197 5 2
+"Ça coûte 12,50 € — c'est très cher, n'est-ce pas ?"	0 25909 66486 13 106 197638 2505 292 501 25 525 4099 59411 4 653 25 525 9 329 452 705 2
+"The quick brown fox jumps over the lazy dog."	0 581 63773 119455 6 147797 88203 7 645 70 21 3285 10269 5 2
+"Straße, Grüße, Æsop, Œuvre, naïve café"	0 90515 4 184191 4 62394 7 2146 4 6 244060 34 13567 4 24 9392 272 26216 2
+"Café decomposed accent"	0 61427 8 277 144429 78550 2
+"FullＷidth ＡＢＣ １２３ and ligature ﬁne"	0 9312 1456 532 927 47457 37638 136 19881 6644 5885 2
+"  leading   and\ttrailing \n whitespace  "	0 105207 136 141037 214 35011 65421 6 2
+"Emoji 😀 test 🇩🇪 and 中文 日本語 한국어"	0 241 121505 21119 3034 6 247289 246143 136 6 32095 6 98449 193751 2
+"Int8-Modell, FP16, LiteRT 2.1.6, whisper.cpp"	0 360 18 1019 9 140290 141 4 6 51006 2485 4 52687 20503 787 122336 4 148 979 20595 5 238 6366 2
+"Zero​width and soft­hyphen"	0 83947 6 146984 136 32977 231 3038 88322 2
+"ÄÖÜ äöü ß ẞ"	0 20056 8655 8047 28190 8902 3449 6 20036 6 3 2
+"l'homme qu'il aime d’accord"	0 96 25 63624 1103 25 379 91022 104 26 55501 2
+"C3PO R2-D2 #hashtag @mention http://example.com/a?b=c"	0 313 363 9698 627 18504 397 304 468 126234 6936 1374 674 1830 1621 696 3355 11 33209 5 277 64 11 32 275 1369 238 2
+""	0 2
+"a"	0 10 2
+"▁ literal marker"	0 15659 289 71323 2
+"Also ich wollte kurz festhalten, was wir heute im Team besprochen haben."	0 22376 654 34485 24573 7594 43864 4 509 1439 14322 566 11399 186 130828 2028 5 2
+"The release is planned for the second week of March."	0 581 54452 83 203251 100 70 17932 5895 111 11994 5 2
+"Bis dahin müssen die Tests auf dem Pixel und auf dem Tablet durchlaufen."	0 14851 48 4505 13286 68 8647 7 644 745 111159 165 644 745 47557 3471 85508 5 2
+"Mara kümmert sich um die Übersetzungen ins Spanische und Französische."	0 17238 157620 3198 833 286 68 221046 33 23 7 63438 4986 165 86914 9515 4986 5 2
+"We still need someone to review the database migration."	0 1401 7464 3871 22008 47 8347 70 63399 212416 5 2
+"Das Budget für die neuen Testgeräte ist noch nicht freigegeben."	0 1858 95457 643 68 16099 8647 179067 443 1838 749 24077 67764 5 2
+"I will ask finance again on Monday."	0 87 1221 26458 82466 13438 98 68318 5 2
+"Die Akkulaufzeit war im letzten Test deutlich schlechter als erwartet."	0 622 165798 57985 13653 1631 566 22003 8647 42287 49861 56 737 96524 5 2
+"Probably the background sync wakes the phone up too often."	0 1250 17105 538 70 76615 6002 238 9908 7 70 24089 1257 5792 27983 5 2
+"Wir treffen uns am Donnerstag um zehn Uhr wieder."	0 3336 67960 2234 444 106229 286 83154 12052 4077 5 2
+"Until then everybody writes down their open questions."	0 992 3675 7068 195348 33022 7 7565 2363 9803 17582 5 2
+"Und bitte denkt daran, die Stundenzettel abzugeben."	0 5533 24730 103898 38231 4 68 39308 169 66192 1563 166632 5 2
+"Am Samstag sind wir früh losgefahren, weil es später regnen sollte."	0 2022 73369 1276 1439 86829 388 429 55024 4 15887 198 38985 33281 33 12961 5 2
+"Die Wanderung ging zuerst durch den Wald und dann am See entlang."	0 622 91259 1619 21859 188077 3471 168 59757 165 3700 444 6872 204486 5 2
+"Oben auf dem Gipfel war es ziemlich windig und kalt."	0 3545 33 644 745 6 230052 1631 198 82289 32382 872 165 48879 5 2
+"Wir haben Brote, Äpfel und eine Thermoskanne Tee dabeigehabt."	0 3336 2028 13177 67 4 20056 254 7510 165 909 204611 22895 86 51026 13404 56358 16723 5 2
+"Auf dem Rückweg hat es dann tatsächlich angefangen zu gewittern."	0 7601 745 32818 12900 1256 198 3700 65624 231312 404 17142 217 22766 5 2
+"Der Zug nach Hause hatte vierzig Minuten Verspätung."	0 1310 96309 1561 51786 10264 10702 38170 40309 35454 10546 8587 5 2
+"Abends haben wir Nudeln mit Tomatensoße gekocht."	0 40274 7 2028 1439 1429 1743 19 491 175557 33 991 20036 13 174261 5 2
+"Am Sonntag habe ich nur gelesen und die Wäsche gemacht."	0 2022 64774 3260 654 1649 122339 165 68 601 973 7560 22961 5 2
+"Nächstes Mal möchte ich gern mit dem Fahrrad fahren."	0 233595 7 3658 20460 654 77400 491 745 165424 84525 5 2
+"Dafür muss ich aber erst die Bremsen reparieren lassen."	0 127315 6869 654 2243 18274 68 6499 39 1015 66417 4921 13195 5 2
+"The ferry leaves at half past six."	0 581 1592 1294 31358 7 99 23552 11015 37195 5 2
+"The lighthouse keeper noticed the lamp flickering just after midnight."	0 581 22729 23923 6 184308 156672 70 36389 33977 11050 214 1660 7103 4122 54350 5 2
+"She climbed the stairs with a wrench and a tin of oil."	0 4687 194637 297 70 126946 7 678 10 148 982 206 136 10 2478 111 29700 5 2
+"Far out on the water a fishing boat was signalling for help."	0 7325 1810 98 70 7401 10 67155 214 139098 509 26073 2069 100 4358 5 2
+"Its engine had failed and the tide was pulling it toward the rocks."	0 1650 7 87907 1902 165523 136 70 2936 13 509 50065 214 442 154732 70 13950 7 5 2
+"She called the harbour on the old radio."	0 4687 35839 70 182 38648 98 70 10332 5977 5 2
+"Nobody answered at first."	0 438 37873 194663 99 5117 5 2
+"Then a sleepy voice promised to send the rescue crew."	0 47009 10 60268 53 54479 103036 71 47 25379 70 6 114777 13 172040 5 2
+"Until they arrived she kept the lamp turning by hand."	0 992 3675 1836 174920 2412 93544 70 36389 174548 390 3535 5 2
+"By sunrise the boat was tied up safely at the pier."	0 3311 4262 58944 70 139098 509 146543 1257 46002 538 99 70 61322 5 2
+"The fishermen brought her a basket of mackerel as thanks."	0 581 67155 56 1055 91048 604 10 149241 111 291 11050 583 237 45458 5 2
+"She fried two of them for breakfast and gave the rest to the cat."	0 4687 6 84285 6626 111 2856 100 118285 136 26038 70 10588 47 70 7515 5 2
+"The broken gear was replaced the following week."	0 581 148431 72397 509 91995 71 70 25632 5895 5 2
+"I called the dentist this morning."	0 87 35839 70 151250 903 42141 5 2
+"They can see me on Tuesday at nine."	0 10660 831 1957 163 98 97001 99 300 86 5 2
+"After that I have to pick up the parcel from the post office."	0 24372 450 87 765 47 39580 1257 70 141485 1295 70 1305 23179 5 2
+"The landlord wants the rent transferred before the first."	0 581 3551 1484 71 86171 70 14457 12302 2822 8108 70 5117 5 2
+"My sister's birthday is on the weekend."	0 2646 114015 25 7 101207 83 98 70 14000 5 2
+"I still need a present for her."	0 87 7464 3871 10 13379 100 604 5 2
+"Maybe a record, she likes old jazz."	0 83425 10 17164 4 2412 1884 7 10332 39644 5 2
+"The car needs new tyres before winter."	0 581 2258 27117 3525 6784 7 8108 41710 5 2
+"And I should finally book the flights to Lisbon."	0 3493 87 5608 77681 12877 70 113014 7 47 230991 5 2
+"a  "	0 10 6 2
+"  a"	0 10 2
+"x\t"	0 1022 6 2
+"a b "	0 10 876 6 2
+"a　b "	0 10 876 6 2
+"a  "	0 10 6 2
+"Tschüss!  "	0 384 3232 26806 7 38 6 2
+"​ leading zero width"	0 105207 45234 6 146984 2
+"a\u000bb\u001ccd"	0 1563 71574 2
+"ab⁠c؜d"	0 10 97636 275 243465 238 3 71 2
+"a b c　d e"	0 10 876 501 104 28 2
+"﻿BOM start"	0 14216 594 4034 2
+"Mixed‍Joiner and RTL‏mark"	0 37286 297 113053 56 136 171064 16188 2
+" "	0 6 2
+"   "	0 6 2
+"▁▁"	0 6 2
+" ▁ "	0 6 2
+"​"	0 6 2
+"a▁b"	0 10 876 2
+"a▁▁b"	0 10 876 2

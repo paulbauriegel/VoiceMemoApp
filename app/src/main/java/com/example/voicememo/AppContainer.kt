@@ -9,6 +9,8 @@ import com.example.voicememo.data.MemoRecord
 import com.example.voicememo.data.MemoRepository
 import com.example.voicememo.data.RoomMemoRepository
 import com.example.voicememo.data.VoiceMemoDatabase
+import com.example.voicememo.embedding.MultilingualE5Embedder
+import com.example.voicememo.embedding.SemanticTranscriptIndex
 import com.example.voicememo.importing.AndroidAudioImporter
 import com.example.voicememo.importing.AudioImporter
 import com.example.voicememo.playback.Media3MemoPlayer
@@ -63,6 +65,12 @@ class AppContainer(
                 context = applicationContext,
                 workManager = workManager,
             ),
+        )
+    }
+    val semanticTranscriptIndex: SemanticTranscriptIndex by lazy {
+        SemanticTranscriptIndex(
+            dao = database.voiceMemoDao(),
+            openEmbedder = { MultilingualE5Embedder.open(applicationContext) },
         )
     }
     val audioImporter: AudioImporter by lazy {

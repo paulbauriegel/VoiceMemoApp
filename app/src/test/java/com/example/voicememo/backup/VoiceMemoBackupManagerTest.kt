@@ -3,6 +3,7 @@ package com.example.voicememo.backup
 import com.example.voicememo.data.MemoRecord
 import com.example.voicememo.data.ProjectIcon
 import com.example.voicememo.data.ProjectRecord
+import com.example.voicememo.data.TranscriptVersion
 import com.example.voicememo.data.TranscriptRecord
 import com.example.voicememo.data.WaveformState
 import java.io.ByteArrayInputStream
@@ -60,7 +61,12 @@ class VoiceMemoBackupManagerTest {
                 isArchived = true,
             ),
         )
-        val exportStore = FakeBackupStore(initialSnapshots = listOf(snapshot))
+        val history = listOf(
+            TranscriptVersion("old", originalId, null, "old-model", false,
+                requireNotNull(snapshot.transcript).copy(generatedText = "Earlier alternative", editedText = null)),
+            TranscriptVersion("chosen", originalId, null, "new-model", true, requireNotNull(snapshot.transcript)),
+        )
+        val exportStore = FakeBackupStore(initialSnapshots = listOf(snapshot.copy(versions = history)))
         val archive = ByteArrayOutputStream()
         DefaultVoiceMemoBackupManager(
             store = exportStore,
@@ -108,6 +114,9 @@ class VoiceMemoBackupManagerTest {
         assertEquals("", restored.transcript?.editedText)
         assertEquals("", restored.transcript?.effectiveText)
         assertEquals(4L, restored.transcript?.generatedRevision)
+        assertEquals(history.map { it.transcript }, restored.versions.map { it.transcript })
+        assertEquals(listOf(false, true), restored.versions.map { it.selected })
+        assertEquals(listOf("old-model", "new-model"), restored.versions.map { it.modelId })
     }
 
     @Test

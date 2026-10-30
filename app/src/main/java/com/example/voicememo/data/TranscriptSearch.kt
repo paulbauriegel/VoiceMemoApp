@@ -7,7 +7,16 @@ package com.example.voicememo.data
 data class TranscriptMatch(
     val segmentIndex: Int,
     val range: IntRange,
+    val kind: TranscriptMatchKind = TranscriptMatchKind.Fuzzy,
 )
+
+enum class TranscriptMatchKind {
+    /** A word that matches the query text. */
+    Fuzzy,
+
+    /** A whole segment whose meaning is close to the query. */
+    Semantic,
+}
 
 /**
  * Find-in-transcript using the same fuzzy rules as library search.
@@ -44,5 +53,38 @@ object TranscriptSearch {
                 emptyList()
             }
         }
+    }
+    /**
+     * Combines fuzzy word matches with semantically ranked segments.
+     *
+     * Fuzzy matches come first in transcript order and keep their word
+     * ranges. Semantic segments follow in rank order, highlighted whole, and
+     * are skipped where a fuzzy match already marks that segment.
+     *
+     * @param semanticSegmentIndices segment indices, best first.
+     */
+    fun merge(
+        segmentTexts: List<String>,
+        fuzzy: List<TranscriptMatch>,
+        semanticSegmentIndices: List<Int>,
+    ): List<TranscriptMatch> {
+        val fuzzySegments = fuzzy.mapTo(HashSet(), TranscriptMatch::segmentIndex)
+        val semantic = semanticSegmentIndices
+            .distinct()
+            .filter { it in segmentTexts.indices && it !in fuzzySegments }
+            .mapNotNull { index ->
+                wholeSegmentRange(segmentTexts[index])?.let { range ->
+                    TranscriptMatch(index, range, TranscriptMatchKind.Semantic)
+                }
+            }
+        return fuzzy + semantic
+    }
+
+    /** The segment without surrounding whitespace, or null when it is blank. */
+    private fun wholeSegmentRange(text: String): IntRange? {
+        val first = text.indexOfFirst { !it.isWhitespace() }
+        if (first < 0) return null
+        val last = text.indexOfLast { !it.isWhitespace() }
+        return first..last
     }
 }

@@ -21,6 +21,7 @@ import com.example.voicememo.coordination.InferenceGate
 import com.example.voicememo.data.MemoRepository
 import com.example.voicememo.data.TranscriptChunk
 import com.example.voicememo.data.TranscriptChunkStatus
+import com.example.voicememo.data.TranscriptSegments
 import com.example.voicememo.data.TranscriptionJob
 import com.example.voicememo.data.TranscriptionJobStatus
 import com.example.voicememo.data.TranscriptionPhase
@@ -44,6 +45,7 @@ import com.example.voicememo.transcription.WhisperFeatureExtractor
 import com.example.voicememo.transcription.WhisperInferenceFingerprint
 import com.example.voicememo.transcription.WhisperLanguage
 import com.example.voicememo.transcription.WhisperAssets
+import com.example.voicememo.transcription.WhisperTokenizer
 import com.example.voicememo.transcription.ParakeetInferenceFingerprint
 import com.example.voicememo.transcription.TranscriptionModel
 import com.example.voicememo.transcription.windowConfig
@@ -568,6 +570,7 @@ class TranscriptionWorker(
                     GraniteRecordingMetadataGenerator.MODEL_ID
                 },
             )
+            indexForSemanticSearch(memoId, job.id)
             benchmark?.finish(outcome = "SUCCESS")
             return Result.success()
         } catch (cancelled: CancellationException) {
@@ -597,6 +600,35 @@ class TranscriptionWorker(
             benchmark?.finish(outcome = "FAILED", errorCode = code)
             failJob(job, code, message)
             return Result.failure(failureData(code, message))
+        }
+    }
+
+    /**
+     * Embeds the finished transcript's segments for semantic find-in-transcript.
+     * It is best effort: the detail screen indexes lazily on the first search,
+     * so a failure or an active recording only defers the work.
+     */
+    private suspend fun indexForSemanticSearch(memoId: String, jobId: String) {
+        if (!BuildConfig.SEMANTIC_SEARCH_ENABLED || InferenceGate.isRecording) return
+        try {
+            val tokenizer = applicationContext.assets.open(WhisperAssets.TOKENIZER)
+                .use(WhisperTokenizer::load)
+            val segments = TranscriptSegments.generated(
+                repository.completedTranscriptChunks(jobId),
+                tokenizer,
+            )
+            val result = container.semanticTranscriptIndex.index(memoId, segments)
+            Log.i(
+                TAG,
+                "Semantic index: ${result.embedded} embedded in ${result.embeddingMillis} ms, " +
+                    "model load ${result.modelLoadMillis} ms.",
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w(TAG, "Semantic transcript indexing failed; it will run on first search.", failure)
+        } finally {
+            withContext(NonCancellable) { container.semanticTranscriptIndex.release() }
         }
     }
 

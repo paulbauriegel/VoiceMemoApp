@@ -9,6 +9,26 @@ import org.junit.Test
 
 class VoiceMemoDatabaseMigrationTest {
     @Test
+    fun migrationElevenToTwelveKeepsExistingTranscriptAndSeedsSelectedHistory() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+        VoiceMemoDatabase.MIGRATION_11_12.migrate(database)
+        val sql = executedSql.joinToString("\n").uppercase()
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS TRANSCRIPT_VERSIONS"))
+        assertTrue(sql.contains("INSERT INTO TRANSCRIPT_VERSIONS"))
+        assertTrue(sql.contains("FROM TRANSCRIPTS T"))
+        assertTrue(sql.contains("AND J.STATUS = 'SUCCEEDED'"))
+        assertFalse(sql.contains("DROP "))
+        assertFalse(sql.contains("DELETE FROM"))
+    }
+
+    @Test
     fun migrationOneToTwoOnlyAddsNullableFingerprintColumn() {
         val executedSql = mutableListOf<String>()
         val database = Proxy.newProxyInstance(
@@ -207,6 +227,36 @@ class VoiceMemoDatabaseMigrationTest {
         assertFalse(normalizedSql.contains("DROP "))
         assertFalse(normalizedSql.contains("DELETE "))
         assertFalse(normalizedSql.contains("NOT NULL"))
+    }
+
+    @Test
+    fun migrationTenToElevenOnlyCreatesTheExportedEmbeddingTable() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+
+        VoiceMemoDatabase.MIGRATION_10_11.migrate(database)
+
+        val normalizedSql = executedSql.single().replace(Regex("\\s+"), " ").trim()
+        assertFalse(normalizedSql.uppercase().contains("DROP "))
+        assertFalse(normalizedSql.uppercase().contains("DELETE FROM"))
+        // Gradle runs unit tests from the app module directory.
+        val schema = java.io.File(
+            "schemas/com.example.voicememo.data.VoiceMemoDatabase/11.json",
+        ).readText()
+        val exported = Regex(
+            "\"createSql\": \"(CREATE TABLE IF NOT EXISTS `\\$\\{TABLE_NAME\\}` " +
+                "\\(`memoId` TEXT NOT NULL, `segmentId` TEXT NOT NULL, `textSha256`[^\"]*)\"",
+        ).find(schema)!!.groupValues[1]
+            .replace("\\u0060", "`")
+            .replace("\${TABLE_NAME}", "transcript_segment_embeddings")
+        fun compact(sql: String) = sql.replace(Regex("\\s*([()])\\s*"), "$1")
+        assertEquals(compact(exported), compact(normalizedSql))
     }
 
     private fun defaultValue(type: Class<*>): Any? = when (type) {

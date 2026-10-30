@@ -3,6 +3,7 @@
 package com.example.voicememo.ui
 
 import android.content.ClipData
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.selection.selectable
@@ -31,6 +32,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import com.example.voicememo.data.TranscriptMatch
+import com.example.voicememo.data.TranscriptMatchKind
 import com.example.voicememo.data.TranscriptSearch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -172,7 +174,11 @@ fun VoiceMemoDetailScreen(
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                // The app draws edge to edge, so shrink the whole screen above
+                // the keyboard; innerPadding already covers the navigation bar.
+                .consumeWindowInsets(innerPadding)
+                .imePadding(),
         ) {
             val stackActions = largeText || maxWidth < 400.dp
             Column(
@@ -641,6 +647,7 @@ private fun TranscriptDetails(
     var transcriptPanelExpanded by rememberSaveable(detail.id) {
         mutableStateOf(true)
     }
+    var versionsOpen by rememberSaveable(detail.id) { mutableStateOf(false) }
     var languageSheetOpen by rememberSaveable(detail.id) {
         mutableStateOf(false)
     }
@@ -652,6 +659,28 @@ private fun TranscriptDetails(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        if (transcript.versions.isNotEmpty()) {
+            Box {
+                OutlinedButton(onClick = { versionsOpen = true }) {
+                    Text(transcript.versions.firstOrNull { it.selected }?.label ?: "Choose transcript")
+                    Icon(Icons.Rounded.ExpandMore, contentDescription = "Choose transcript version")
+                }
+                androidx.compose.material3.DropdownMenu(
+                    expanded = versionsOpen,
+                    onDismissRequest = { versionsOpen = false },
+                ) {
+                    transcript.versions.forEach { version ->
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text(if (version.selected) "✓ ${version.label}" else version.label) },
+                            onClick = {
+                                versionsOpen = false
+                                onAction(VoiceMemoUiAction.SelectTranscriptVersion(version.id))
+                            },
+                        )
+                    }
+                }
+            }
+        }
         when (transcript.phase) {
             TranscriptionPhase.NotRequested -> {
                 Surface(
@@ -768,6 +797,15 @@ private fun TranscriptDetails(
                         }
                     }
                 }
+                if (transcript.versions.isNotEmpty()) {
+                    TranscriptFocusPanel(
+                        detail = detail, transcript = transcript, largeText = largeText,
+                        expanded = transcriptPanelExpanded,
+                        onExpandedChange = { transcriptPanelExpanded = it },
+                        onTranscribeAgain = { languageSheetOpen = true }, onAction = onAction,
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                    )
+                }
             }
 
             TranscriptionPhase.Complete -> {
@@ -817,7 +855,7 @@ private fun TranscriptDetails(
             },
             selectedCode = transcript.selectedLanguageCode,
             languages = transcript.languages,
-            replacesEdits = transcript.isEdited,
+            replacesEdits = transcript.versions.isNotEmpty() || transcript.text.isNotEmpty(),
             onDismiss = { languageSheetOpen = false },
             onConfirm = { code ->
                 languageSheetOpen = false
@@ -851,10 +889,34 @@ private fun TranscriptFocusPanel(
         .takeIf { it.isNotEmpty() }
         ?.map(TranscriptSegmentUi::text)
         ?: listOf(transcript.text)
-    val matches = remember(searchTexts, searchedQuery, searchActive) {
+    LaunchedEffect(searchedQuery, searchActive) {
+        onAction(
+            VoiceMemoUiAction.SearchTranscriptSemantically(
+                if (searchActive) searchedQuery else "",
+            ),
+        )
+    }
+    // Semantic hits arrive asynchronously and only count for the current query.
+    val semanticIndices = remember(transcript.segments, transcript.semanticSearch, searchedQuery) {
+        val semantic = transcript.semanticSearch
+            ?.takeIf { it.query == searchedQuery }
+            ?: return@remember emptyList()
+        val indexById = transcript.segments.withIndex().associate { (index, segment) ->
+            segment.id to index
+        }
+        semantic.segmentIds.mapNotNull(indexById::get)
+    }
+    val fuzzyMatches = remember(searchTexts, searchedQuery, searchActive) {
         if (searchActive) TranscriptSearch.find(searchTexts, searchedQuery) else emptyList()
     }
-    LaunchedEffect(matches) { currentMatch = 0 }
+    val matches = remember(searchTexts, fuzzyMatches, semanticIndices) {
+        TranscriptSearch.merge(searchTexts, fuzzyMatches, semanticIndices)
+    }
+    // Semantic hits append after the fuzzy ones, so stepping position survives them.
+    LaunchedEffect(fuzzyMatches) { currentMatch = 0 }
+    LaunchedEffect(matches.size) {
+        if (currentMatch >= matches.size) currentMatch = 0
+    }
     val canEditSegments = transcript.segments.isNotEmpty()
     val editMode = editModeRequested && canEditSegments
 
@@ -940,7 +1002,8 @@ private fun TranscriptFocusPanel(
                         .fillMaxWidth()
                         .weight(1f),
                 )
-                if (transcript.editingSegmentId == null) {
+                // Searching and editing need the space for the transcript.
+                if (!searchActive && !editMode) {
                     HorizontalDivider(
                         modifier = Modifier.padding(horizontal = 16.dp),
                         color = MaterialTheme.colorScheme.outlineVariant,
@@ -1124,7 +1187,7 @@ private fun TranscriptSearchBar(
                 if (hasQuery) {
                     Text(
                         text = if (matchCount == 0) {
-                            "0"
+                            "No matches"
                         } else {
                             "${currentMatch + 1}/$matchCount"
                         },
@@ -1189,6 +1252,7 @@ private fun TranscriptTextPanel(
     modifier: Modifier = Modifier,
 ) {
     val matchColor = MaterialTheme.colorScheme.tertiaryContainer
+    val semanticMatchColor = MaterialTheme.colorScheme.secondaryContainer
     val currentMatchColor = MaterialTheme.colorScheme.tertiary
     val currentMatchContent = MaterialTheme.colorScheme.onTertiary
     val matchesBySegment = remember(matches) {
@@ -1224,6 +1288,7 @@ private fun TranscriptTextPanel(
                         matches = matchesBySegment[0].orEmpty(),
                         currentMatch = currentMatch,
                         matchColor = matchColor,
+                        semanticMatchColor = semanticMatchColor,
                         currentMatchColor = currentMatchColor,
                         currentMatchContent = currentMatchContent,
                     ),
@@ -1260,9 +1325,7 @@ private fun TranscriptTextPanel(
 
             LazyColumn(
                 state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .imePadding(),
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,
                     vertical = 12.dp,
@@ -1291,6 +1354,7 @@ private fun TranscriptTextPanel(
                                 matches = matchesBySegment[index].orEmpty(),
                                 currentMatch = currentMatch,
                                 matchColor = matchColor,
+                                semanticMatchColor = semanticMatchColor,
                                 currentMatchColor = currentMatchColor,
                                 currentMatchContent = currentMatchContent,
                             ),
@@ -1317,6 +1381,7 @@ private fun highlightMatches(
     matches: List<IndexedValue<TranscriptMatch>>,
     currentMatch: Int,
     matchColor: Color,
+    semanticMatchColor: Color,
     currentMatchColor: Color,
     currentMatchContent: Color,
 ): AnnotatedString = buildAnnotatedString {
@@ -1326,6 +1391,9 @@ private fun highlightMatches(
         addStyle(
             style = if (index == currentMatch) {
                 SpanStyle(background = currentMatchColor, color = currentMatchContent)
+            } else if (match.kind == TranscriptMatchKind.Semantic) {
+                // Related segments are highlighted whole in a quieter color.
+                SpanStyle(background = semanticMatchColor)
             } else {
                 SpanStyle(background = matchColor)
             },
@@ -1537,9 +1605,9 @@ private fun TranscribeSheet(
             }
             if (replacesEdits) {
                 Text(
-                    text = "Your edits will be replaced by the new transcript.",
+                    text = "Your current transcript and edits will be kept as a saved version.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Button(

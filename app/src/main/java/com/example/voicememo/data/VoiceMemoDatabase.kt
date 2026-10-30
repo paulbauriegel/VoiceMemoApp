@@ -13,12 +13,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MemoRecord::class,
         ProjectRecord::class,
         TranscriptRecord::class,
+        TranscriptVersion::class,
         TranscriptChunk::class,
         TranscriptionJob::class,
         MemoSearchFts::class,
         TranscriptSegmentEdit::class,
+        TranscriptSegmentEmbedding::class,
     ],
-    version = 10,
+    version = 12,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -45,8 +47,40 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
+                    MIGRATION_10_11,
+                    MIGRATION_11_12,
                 )
                 .build()
+
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS transcript_versions (
+                        id TEXT NOT NULL PRIMARY KEY, memoId TEXT NOT NULL,
+                        jobId TEXT, modelId TEXT, selected INTEGER NOT NULL,
+                        saved_memoId TEXT NOT NULL, saved_generatedText TEXT,
+                        saved_editedText TEXT, saved_detectedLanguage TEXT,
+                        saved_generatedAtMillis INTEGER, saved_editedAtMillis INTEGER,
+                        saved_generatedRevision INTEGER NOT NULL, segmentEdits TEXT NOT NULL,
+                        FOREIGN KEY(memoId) REFERENCES memos(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_transcript_versions_memoId ON transcript_versions(memoId)")
+                // Existing transcripts and corrections remain in place. Before a version
+                // is switched or replaced the repository snapshots their current edits.
+                db.execSQL("""
+                    INSERT INTO transcript_versions
+                    SELECT 'legacy:' || t.memoId, t.memoId,
+                        (SELECT id FROM transcription_jobs j WHERE j.memoId = t.memoId
+                         AND j.status = 'SUCCEEDED' ORDER BY updatedAtMillis DESC, createdAtMillis DESC, id DESC LIMIT 1),
+                        (SELECT transcriptionModelId FROM transcription_jobs j WHERE j.memoId = t.memoId
+                         AND j.status = 'SUCCEEDED' ORDER BY updatedAtMillis DESC, createdAtMillis DESC, id DESC LIMIT 1),
+                        1, t.memoId, t.generatedText, t.editedText, t.detectedLanguage,
+                        t.generatedAtMillis, t.editedAtMillis, t.generatedRevision, ''
+                    FROM transcripts t
+                """.trimIndent())
+            }
+        }
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -168,6 +202,26 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                         `segmentId` TEXT NOT NULL,
                         `text` TEXT NOT NULL,
                         `editedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`memoId`, `segmentId`),
+                        FOREIGN KEY(`memoId`) REFERENCES `memos`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        internal val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `transcript_segment_embeddings` (
+                        `memoId` TEXT NOT NULL,
+                        `segmentId` TEXT NOT NULL,
+                        `textSha256` TEXT NOT NULL,
+                        `modelId` TEXT NOT NULL,
+                        `vector` BLOB NOT NULL,
+                        `embeddedAtMillis` INTEGER NOT NULL,
                         PRIMARY KEY(`memoId`, `segmentId`),
                         FOREIGN KEY(`memoId`) REFERENCES `memos`(`id`)
                             ON UPDATE NO ACTION ON DELETE CASCADE

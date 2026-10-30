@@ -42,6 +42,8 @@ interface MemoRepository {
 
     fun observeMemo(memoId: String): Flow<MemoDetail?>
 
+    suspend fun selectTranscriptVersion(memoId: String, versionId: String)
+
     suspend fun getMemo(memoId: String): MemoRecord?
 
     suspend fun createMemo(newMemo: NewMemo): MemoRecord
@@ -72,8 +74,7 @@ interface MemoRepository {
     suspend fun setLanguageOverride(memoId: String, language: String?)
 
     /**
-     * Replaces only the generated copy. An edited copy, including an
-     * intentionally empty edit, is preserved.
+     * Adds a generated version, retaining the previous result and its edits.
      */
     suspend fun saveGeneratedTranscript(
         memoId: String,
@@ -142,7 +143,7 @@ interface MemoRepository {
 
     /**
      * Atomically stores the merged generated result and marks its durable job
-     * complete. Any existing edited transcript remains effective.
+     * complete. The previous transcript and its edits remain available as a version.
      */
     suspend fun completeTranscriptionJob(
         jobId: String,
@@ -208,26 +209,77 @@ class RoomMemoRepository(
                     flowOf(null)
                 } else {
                     val latestJob = aggregate.transcriptionJobs.maxByOrNull { it.updatedAtMillis }
-                    val transcriptChunkJob = selectTranscriptChunkJob(
-                        aggregate.transcriptionJobs,
-                    )
-                    val chunks = if (transcriptChunkJob == null) {
-                        flowOf(emptyList())
-                    } else {
-                        dao.observeTranscriptChunks(transcriptChunkJob.id)
-                    }
-                    combine(chunks, dao.observeSegmentEdits(memoId)) { chunks, edits ->
-                        MemoDetail(
-                            memo = aggregate.memo,
-                            transcript = aggregate.transcripts.singleOrNull(),
-                            latestJob = latestJob,
-                            chunks = chunks,
-                            segmentEdits = edits,
-                        )
+                    dao.observeTranscriptVersions(memoId).flatMapLatest { versions ->
+                        val selected = versions.firstOrNull { it.selected }
+                        val selectedJob = selected?.jobId?.let { id ->
+                            aggregate.transcriptionJobs.firstOrNull { it.id == id }
+                        }
+                        val transcriptChunkJob = if (selected != null) selectedJob else
+                            selectTranscriptChunkJob(aggregate.transcriptionJobs)
+                        val chunks = transcriptChunkJob?.let { dao.observeTranscriptChunks(it.id) }
+                            ?: flowOf(emptyList())
+                        combine(chunks, dao.observeSegmentEdits(memoId)) { chunks, edits ->
+                            MemoDetail(
+                                memo = aggregate.memo,
+                                transcript = aggregate.transcripts.singleOrNull(),
+                                latestJob = latestJob,
+                                chunks = chunks,
+                                segmentEdits = edits,
+                                versions = versions,
+                                selectedJob = selectedJob,
+                            )
+                        }
                     }
                 }
             }
             .distinctUntilChanged()
+
+    /** Save corrections to their own version before changing the active copy. */
+    private suspend fun snapshotCurrent(memoId: String) {
+        val transcript = dao.getTranscript(memoId) ?: return
+        val selected = dao.getTranscriptVersions(memoId).firstOrNull { it.selected }
+        val job = if (selected == null) dao.getLatestJobForMemo(memoId)
+            ?.takeIf { it.status == TranscriptionJobStatus.SUCCEEDED } else null
+        dao.upsertTranscriptVersion(
+            (selected ?: TranscriptVersion(
+                id = UUID.randomUUID().toString(), memoId = memoId,
+                jobId = job?.id, modelId = job?.transcriptionModelId,
+                selected = true, transcript = transcript,
+            )).copy(transcript = transcript,
+                segmentEdits = TranscriptEditSnapshot.encode(dao.getSegmentEdits(memoId))),
+        )
+    }
+
+    override suspend fun selectTranscriptVersion(memoId: String, versionId: String) {
+        database.withTransaction {
+            val memo = requireMemo(memoId)
+            snapshotCurrent(memoId)
+            val versions = dao.getTranscriptVersions(memoId)
+            val target = requireNotNull(versions.firstOrNull { it.id == versionId }) {
+                "Unknown transcript version."
+            }
+            versions.forEach { dao.upsertTranscriptVersion(it.copy(selected = it.id == versionId)) }
+            dao.upsertTranscript(target.transcript)
+            dao.deleteSegmentEdits(memoId)
+            TranscriptEditSnapshot.decode(memoId, target.segmentEdits).forEach { dao.upsertSegmentEdit(it) }
+            dao.updateMemo(memo.copy(updatedAtMillis = System.currentTimeMillis()))
+            dao.replaceSearchEntry(memo, target.transcript)
+        }
+    }
+
+    private suspend fun saveNewVersion(transcript: TranscriptRecord, job: TranscriptionJob?) {
+        snapshotCurrent(transcript.memoId)
+        dao.getTranscriptVersions(transcript.memoId).filter { it.selected }.forEach {
+            dao.upsertTranscriptVersion(it.copy(selected = false))
+        }
+        dao.upsertTranscriptVersion(TranscriptVersion(
+            id = job?.id ?: UUID.randomUUID().toString(), memoId = transcript.memoId,
+            jobId = job?.id, modelId = job?.transcriptionModelId,
+            selected = true, transcript = transcript,
+        ))
+        dao.deleteSegmentEdits(transcript.memoId)
+        dao.upsertTranscript(transcript)
+    }
 
     override suspend fun getMemo(memoId: String): MemoRecord? = dao.getMemo(memoId)
 
@@ -380,13 +432,13 @@ class RoomMemoRepository(
             val updated = TranscriptRecord(
                 memoId = memoId,
                 generatedText = text,
-                editedText = current?.editedText,
+                editedText = null,
                 detectedLanguage = detectedLanguage,
                 generatedAtMillis = generatedAtMillis,
-                editedAtMillis = current?.editedAtMillis,
+                editedAtMillis = null,
                 generatedRevision = (current?.generatedRevision ?: 0) + 1,
             )
-            dao.upsertTranscript(updated)
+            saveNewVersion(updated, null)
             dao.updateMemo(memo.copy(updatedAtMillis = generatedAtMillis))
             dao.replaceSearchEntry(
                 memo = memo.copy(updatedAtMillis = generatedAtMillis),
@@ -595,10 +647,10 @@ class RoomMemoRepository(
             val transcript = TranscriptRecord(
                 memoId = job.memoId,
                 generatedText = mergedText,
-                editedText = currentTranscript?.editedText,
+                editedText = null,
                 detectedLanguage = detectedLanguage,
                 generatedAtMillis = completedAtMillis,
-                editedAtMillis = currentTranscript?.editedAtMillis,
+                editedAtMillis = null,
                 generatedRevision = (currentTranscript?.generatedRevision ?: 0) + 1,
             )
             val completedJob = job.copy(
@@ -628,7 +680,7 @@ class RoomMemoRepository(
                 metadataModelId = metadataModelId,
                 generatedAtMillis = completedAtMillis,
             )
-            dao.upsertTranscript(transcript)
+            saveNewVersion(transcript, completedJob)
             dao.upsertTranscriptionJob(completedJob)
             dao.updateMemo(updatedMemo)
             dao.replaceSearchEntry(updatedMemo, transcript)
