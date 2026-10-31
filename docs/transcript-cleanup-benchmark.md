@@ -103,3 +103,29 @@ meaning changes. Human review should classify repairs, introduced errors,
 unnecessary stylistic changes, and uncertain edits separately. Preserve clean
 passages as controls. A later annotated, held-out reference enables real WER/CER,
 entity repair precision/recall, and damage-rate measurement.
+
+## Deterministic name-only baseline
+
+`compare-name-cleanup.py` compares an explicit alias table with the saved model
+outputs. It requires no inference or network. Keep the private alias configuration
+and generated reports under ignored `build/reports/`.
+
+```sh
+python3 scripts/compare-name-cleanup.py \
+  --run build/reports/cleanup-comparison \
+  --aliases /absolute/path/to/private-name-aliases.json \
+  --output build/reports/cleanup-comparison/name-baseline
+```
+
+Configuration shape: `{"aliases":{"Nohra":"Nora","Nohras":"Noras"},
+"review_only":["ambiguous word"]}`. Replacements are case-sensitive, whole-token,
+single-pass operations. List possessive forms explicitly. All other characters
+remain unchanged, and the runner verifies the original source hash before and
+after generation. Review-only terms produce contextual candidates without edits.
+
+The report includes every edit offset, reconstructed transcript, HTML comparison,
+and per-model counts over the available matching segments. Remaining alias counts
+and word edits after alias normalization are descriptive metrics, not accuracy.
+Models may reduce alias counts by deleting content. The alias list itself encodes
+contextual assumptions; do not treat an alias replacement as audio-verified truth.
+Ordinary words that resemble names should remain review candidates.
