@@ -5,7 +5,7 @@ package com.example.voicememo.ui
 import android.content.ClipData
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,7 +37,12 @@ import com.example.voicememo.data.TranscriptSearch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,6 +70,9 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PersonOutline
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay5
@@ -79,10 +87,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -1308,34 +1318,67 @@ private fun TranscriptTextPanel(
             }
             val followPlayback = matches.isEmpty() && transcript.editingSegmentId == null
 
-            LaunchedEffect(activeIndex, followPlayback) {
+            // Lines get a speaker slot once the recording has been analysed.
+            val showSpeakers = transcript.speakerStatus == SpeakerLabelStatus.Labelled ||
+                transcript.speakerStatus == SpeakerLabelStatus.NoVoiceSample
+            // Each list row shows one line, or several lines of one speaker joined for reading.
+            // Editing works on single lines, so joining is off while it is active.
+            val joinLines = transcript.joinSpeakerLines && showSpeakers && !editMode &&
+                transcript.editingSegmentId == null
+            val rows = remember(segments, joinLines) {
+                if (joinLines) joinSpeakerLines(segments) else segments.indices.map { it..it }
+            }
+            fun rowOf(segmentIndex: Int) = rows.indexOfFirst { segmentIndex in it }
+
+            LaunchedEffect(activeIndex, followPlayback, rows) {
                 if (followPlayback && activeIndex >= 0) {
                     listState.animateScrollToItem(
-                        index = (activeIndex - 1).coerceAtLeast(0),
+                        index = (rowOf(activeIndex) - 1).coerceAtLeast(0),
                     )
                 }
             }
-            LaunchedEffect(focusedSegment) {
+            LaunchedEffect(focusedSegment, rows) {
                 if (focusedSegment != null) {
                     listState.animateScrollToItem(
-                        index = (focusedSegment - 1).coerceAtLeast(0),
+                        index = (rowOf(focusedSegment) - 1).coerceAtLeast(0),
                     )
                 }
             }
-
+            Column(modifier = Modifier.fillMaxSize()) {
+            SpeakerStatusBanner(
+                status = transcript.speakerStatus,
+                progress = transcript.speakerProgress,
+                onAction = onAction,
+            )
+            if (showSpeakers) SpeakerLegend()
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,
                     vertical = 12.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                itemsIndexed(
-                    items = segments,
-                    key = { _, segment -> segment.id },
-                ) { index, segment ->
+                items(
+                    items = rows,
+                    key = { row -> segments[row.first].id },
+                ) { row ->
+                    val first = segments[row.first]
+                    val last = segments[row.last]
+                    // A joined row stands for its lines: first timestamp, whole time range.
+                    val segment = if (row.first == row.last) {
+                        first
+                    } else {
+                        first.copy(
+                            endMillis = last.endMillis,
+                            endLabel = last.endLabel,
+                            isEdited = row.any { segments[it].isEdited },
+                            speakerSetByUser = row.any { segments[it].speakerSetByUser },
+                        )
+                    }
                     val active = playbackPositionMillis >= segment.startMillis &&
                         playbackPositionMillis < segment.endMillis
                     if (segment.id == transcript.editingSegmentId) {
@@ -1343,22 +1386,40 @@ private fun TranscriptTextPanel(
                             segment = segment,
                             draft = transcript.segmentDraft,
                             largeText = largeText,
+                            showSpeaker = showSpeakers,
                             onAction = onAction,
                         )
                     } else {
                         TranscriptSegmentRow(
                             segment = segment,
                             active = active,
-                            text = highlightMatches(
-                                text = segment.text,
-                                matches = matchesBySegment[index].orEmpty(),
-                                currentMatch = currentMatch,
-                                matchColor = matchColor,
-                                semanticMatchColor = semanticMatchColor,
-                                currentMatchColor = currentMatchColor,
-                                currentMatchContent = currentMatchContent,
-                            ),
+                            text = buildAnnotatedString {
+                                for (index in row) {
+                                    if (index > row.first) append(" ")
+                                    append(
+                                        highlightMatches(
+                                            text = segments[index].text,
+                                            matches = matchesBySegment[index].orEmpty(),
+                                            currentMatch = currentMatch,
+                                            matchColor = matchColor,
+                                            semanticMatchColor = semanticMatchColor,
+                                            currentMatchColor = currentMatchColor,
+                                            currentMatchContent = currentMatchContent,
+                                        ),
+                                    )
+                                }
+                            },
                             editMode = editMode,
+                            showSpeaker = showSpeakers,
+                            onSpeakerChange = { speaker ->
+                                onAction(
+                                    VoiceMemoUiAction.SetSegmentSpeaker(
+                                        segmentId = segment.id,
+                                        speaker = speaker,
+                                        joinedSegmentIds = row.drop(1).map { segments[it].id },
+                                    ),
+                                )
+                            },
                             onClick = {
                                 onAction(
                                     if (editMode) {
@@ -1371,6 +1432,7 @@ private fun TranscriptTextPanel(
                         )
                     }
                 }
+            }
             }
         }
     }
@@ -1409,6 +1471,8 @@ private fun TranscriptSegmentRow(
     active: Boolean,
     text: AnnotatedString,
     editMode: Boolean,
+    showSpeaker: Boolean = false,
+    onSpeakerChange: (SpeakerUi?) -> Unit = {},
     onClick: () -> Unit,
 ) {
     val containerColor by animateColorAsState(
@@ -1443,6 +1507,9 @@ private fun TranscriptSegmentRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.Top,
         ) {
+            if (showSpeaker) {
+                SegmentSpeakerIcon(segment = segment, onSpeakerChange = onSpeakerChange)
+            }
             Column(
                 modifier = Modifier.width(48.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1489,11 +1556,166 @@ private fun TranscriptSegmentRow(
     }
 }
 
+/**
+ * Who speaks in this line, before its timestamp: a filled person for the user,
+ * an outlined one for someone else, two people when both talk. Tapping it lets
+ * the user correct the line; "This is me" also teaches the voice profile.
+ */
+@Composable
+private fun SegmentSpeakerIcon(
+    segment: TranscriptSegmentUi,
+    onSpeakerChange: (SpeakerUi?) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val description = when (segment.speaker) {
+        SpeakerUi.Me -> "You"
+        SpeakerUi.Other -> "Someone else"
+        SpeakerUi.Mixed -> "You and someone else"
+        null -> "Speaker unknown"
+    }
+    Box {
+        Icon(
+            imageVector = when (segment.speaker) {
+                SpeakerUi.Me -> Icons.Rounded.Person
+                SpeakerUi.Mixed -> Icons.Rounded.Group
+                SpeakerUi.Other, null -> Icons.Rounded.PersonOutline
+            },
+            contentDescription = "$description. Change speaker",
+            modifier = Modifier
+                .size(24.dp)
+                .clip(CircleShape)
+                .clickable { menuOpen = true }
+                .testTag("segment_speaker_${segment.speaker?.name ?: "Unknown"}"),
+            tint = when (segment.speaker) {
+                SpeakerUi.Me -> MaterialTheme.colorScheme.primary
+                SpeakerUi.Other, SpeakerUi.Mixed -> MaterialTheme.colorScheme.onSurfaceVariant
+                null -> MaterialTheme.colorScheme.outlineVariant
+            },
+        )
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("This is me") },
+                leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
+                onClick = {
+                    menuOpen = false
+                    onSpeakerChange(SpeakerUi.Me)
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Someone else") },
+                leadingIcon = { Icon(Icons.Rounded.PersonOutline, contentDescription = null) },
+                onClick = {
+                    menuOpen = false
+                    onSpeakerChange(SpeakerUi.Other)
+                },
+            )
+            if (segment.speakerSetByUser) {
+                DropdownMenuItem(
+                    text = { Text("Use automatic label") },
+                    leadingIcon = { Icon(Icons.Rounded.Restore, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onSpeakerChange(null)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SpeakerStatusBanner(
+    status: SpeakerLabelStatus,
+    progress: Float?,
+    onAction: (VoiceMemoUiAction) -> Unit,
+) {
+    val message = when (status) {
+        SpeakerLabelStatus.NotAnalysed -> "Speakers are not identified in this recording yet."
+        SpeakerLabelStatus.Analysing -> when (progress) {
+            null -> "Waiting to identify speakers…"
+            else -> "Identifying speakers on this device · ${(progress * 100).toInt()}%"
+        }
+        SpeakerLabelStatus.NoVoiceSample ->
+            "Tap the person icon on a line you spoke and choose “This is me”, " +
+                "or add a voice sample in Settings."
+        SpeakerLabelStatus.Hidden, SpeakerLabelStatus.Labelled -> return
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 8.dp, top = 8.dp)
+            .testTag("speaker_status_banner"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (status == SpeakerLabelStatus.NotAnalysed) {
+                TextButton(onClick = { onAction(VoiceMemoUiAction.IdentifySpeakers) }) {
+                    Text("Identify")
+                }
+            }
+        }
+        if (status == SpeakerLabelStatus.Analysing) {
+            val barModifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 8.dp)
+                .testTag("speaker_progress")
+            if (progress == null) {
+                LinearProgressIndicator(modifier = barModifier)
+            } else {
+                LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = barModifier)
+            }
+        }
+    }
+}
+
+/** Explains the icons in front of the timestamps. */
+@Composable
+private fun SpeakerLegend() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp)
+            .testTag("speaker_legend"),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SpeakerLegendEntry(Icons.Rounded.Person, MaterialTheme.colorScheme.primary, "You")
+        SpeakerLegendEntry(Icons.Rounded.PersonOutline, MaterialTheme.colorScheme.onSurfaceVariant, "Others")
+        SpeakerLegendEntry(Icons.Rounded.Group, MaterialTheme.colorScheme.onSurfaceVariant, "Both")
+        SpeakerLegendEntry(Icons.Rounded.PersonOutline, MaterialTheme.colorScheme.outlineVariant, "Unclear")
+    }
+}
+
+@Composable
+private fun SpeakerLegendEntry(icon: ImageVector, tint: Color, label: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tint)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun TranscriptSegmentEditor(
     segment: TranscriptSegmentUi,
     draft: String,
     largeText: Boolean,
+    showSpeaker: Boolean = false,
     onAction: (VoiceMemoUiAction) -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -1523,6 +1745,46 @@ private fun TranscriptSegmentEditor(
                     .testTag("transcript_editor"),
                 textStyle = MaterialTheme.typography.bodyMedium,
             )
+            if (showSpeaker) {
+                // The speaker is saved at once, independent of the text's Save and Cancel.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .testTag("segment_editor_speaker"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Speaker",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FilterChip(
+                        selected = segment.speaker == SpeakerUi.Me,
+                        onClick = { onAction(VoiceMemoUiAction.SetSegmentSpeaker(segment.id, SpeakerUi.Me)) },
+                        label = { Text("Me") },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                    )
+                    FilterChip(
+                        selected = segment.speaker == SpeakerUi.Other,
+                        onClick = { onAction(VoiceMemoUiAction.SetSegmentSpeaker(segment.id, SpeakerUi.Other)) },
+                        label = { Text("Others") },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.PersonOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                    )
+                    if (segment.speakerSetByUser) {
+                        TextButton(
+                            onClick = { onAction(VoiceMemoUiAction.SetSegmentSpeaker(segment.id, null)) },
+                        ) {
+                            Text("Automatic")
+                        }
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),

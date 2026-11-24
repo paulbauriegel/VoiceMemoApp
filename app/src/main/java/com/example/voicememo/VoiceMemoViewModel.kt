@@ -30,6 +30,14 @@ import com.example.voicememo.sharing.ShareContent
 import com.example.voicememo.sharing.ShareableMemo
 import com.example.voicememo.settings.AppearanceMode
 import com.example.voicememo.embedding.MultilingualE5Embedder
+import com.example.voicememo.coordination.InferenceGate
+import com.example.voicememo.data.SpeakerVoiceSample
+import com.example.voicememo.speaker.PyannoteSegmenter
+import com.example.voicememo.speaker.SpeakerLabel
+import com.example.voicememo.speaker.SpeakerProfiles
+import com.example.voicememo.speaker.SpeakerTimeline
+import com.example.voicememo.work.SpeakerLabelWorker
+import com.example.voicememo.speaker.CamPlusPlusEmbedder
 import com.example.voicememo.ui.DetailSection
 import com.example.voicememo.ui.LicenseUi
 import com.example.voicememo.ui.LibraryTab
@@ -56,6 +64,7 @@ import com.example.voicememo.transcription.SileroVoiceActivityDetector
 import com.example.voicememo.transcription.GraniteRecordingMetadataGenerator
 import com.example.voicememo.transcription.WhisperAssets
 import com.example.voicememo.transcription.ParakeetAssets
+import com.example.voicememo.transcription.ParakeetModelFiles
 import com.example.voicememo.transcription.WhisperTimestampTokens
 import com.example.voicememo.transcription.WhisperTokenizer
 import java.io.File
@@ -114,8 +123,13 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.transcriptionTimingEnabled,
             transcriptionModelId =
                 container.transcriptionPreferences.transcriptionModelId,
+            speakerLabelsEnabled =
+                container.transcriptionPreferences.speakerLabelsEnabled,
+            joinSpeakerLines =
+                container.transcriptionPreferences.joinSpeakerLinesEnabled,
         ),
     )
+    private val stopVoiceSample = java.util.concurrent.atomic.AtomicBoolean(false)
     private var semanticSearchJob: Job? = null
     private val waveformCache = ConcurrentHashMap<WaveformCacheKey, List<Float>>()
     private val mutableEffects = MutableSharedFlow<VoiceMemoUiEffect>(extraBufferCapacity = 8)
@@ -143,7 +157,7 @@ class VoiceMemoViewModel(
             ),
             LicenseUi(
                 name = "LiteRT Parakeet conversion",
-                version = ParakeetAssets.MODEL_REVISION.take(8),
+                version = ParakeetAssets.ENCODER_SHA256.take(8),
                 licenseName = "Apache License 2.0",
                 notice = resources.openRawResource(R.raw.litert_apache_2_0)
                     .bufferedReader()
@@ -195,6 +209,24 @@ class VoiceMemoViewModel(
                     .bufferedReader()
                     .use { it.readText() },
                 sourceUrl = "https://huggingface.co/intfloat/multilingual-e5-small",
+            ),
+            LicenseUi(
+                name = "pyannote segmentation",
+                version = PyannoteSegmenter.MODEL_VERSION,
+                licenseName = "MIT License",
+                notice = resources.openRawResource(R.raw.pyannote_segmentation_mit)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://huggingface.co/pyannote/segmentation-3.0",
+            ),
+            LicenseUi(
+                name = "3D-Speaker CAM++ (Chinese and English)",
+                version = CamPlusPlusEmbedder.MODEL_SHA256.take(8),
+                licenseName = "Apache License 2.0",
+                notice = resources.openRawResource(R.raw.threed_speaker_campplus_apache_2_0)
+                    .bufferedReader()
+                    .use { it.readText() },
+                sourceUrl = "https://github.com/modelscope/3D-Speaker",
             ),
             LicenseUi(
                 name = "Microsoft ONNX Runtime",
@@ -313,6 +345,12 @@ class VoiceMemoViewModel(
             transcribeWhileRecordingEnabled = local.transcribeWhileRecordingEnabled,
             transcriptionTimingEnabled = local.transcriptionTimingEnabled,
             transcriptionModelId = local.transcriptionModelId,
+            parakeetInstalled = ParakeetModelFiles.isInstalled(getApplication<Application>()),
+            speakerLabelsAvailable = BuildConfig.SPEAKER_LABELS_ENABLED,
+            speakerLabelsEnabled = local.speakerLabelsEnabled,
+            joinSpeakerLines = local.joinSpeakerLines,
+            speakerPeople = local.speakerPeople,
+            voiceSampleRecording = local.voiceSampleRecording,
             recorder = recorder.toUi(),
             detail = memoDetail?.toUi(playback, local),
             modelAvailability = modelAvailability(),
@@ -342,10 +380,12 @@ class VoiceMemoViewModel(
                 container.transcriptionPreferences.transcriptionTimingEnabled,
             transcriptionModelId =
                 container.transcriptionPreferences.transcriptionModelId,
+            parakeetInstalled = ParakeetModelFiles.isInstalled(getApplication<Application>()),
         ),
     )
 
     init {
+        if (BuildConfig.SPEAKER_LABELS_ENABLED) observeSpeakers()
         viewModelScope.launch {
             container.recorderController.state.collect { state ->
                 if (state is RecordingState.Completed) {
@@ -638,6 +678,27 @@ class VoiceMemoViewModel(
                 }
             }
 
+            is VoiceMemoUiAction.SpeakerLabelsChanged -> {
+                container.transcriptionPreferences.speakerLabelsEnabled = action.enabled
+                presentation.update { it.copy(speakerLabelsEnabled = action.enabled) }
+            }
+
+            is VoiceMemoUiAction.JoinSpeakerLinesChanged -> {
+                container.transcriptionPreferences.joinSpeakerLinesEnabled = action.enabled
+                presentation.update { it.copy(joinSpeakerLines = action.enabled) }
+            }
+
+            VoiceMemoUiAction.StartVoiceSample -> startVoiceSample()
+            VoiceMemoUiAction.StopVoiceSample -> stopVoiceSample.set(true)
+            is VoiceMemoUiAction.DeleteVoiceSample -> viewModelScope.launch {
+                runCatching { container.speakerProfiles.deleteSample(action.sampleId) }
+                    .onFailure { mutableEffects.emitMessage("Could not delete the voice sample.") }
+            }
+
+            is VoiceMemoUiAction.SetSegmentSpeaker ->
+                setSegmentSpeaker(listOf(action.segmentId) + action.joinedSegmentIds, action.speaker)
+            VoiceMemoUiAction.IdentifySpeakers -> identifySpeakers()
+
             is VoiceMemoUiAction.GpuAccelerationChanged -> {
                 container.transcriptionPreferences.gpuAccelerationEnabled =
                     action.enabled
@@ -903,6 +964,7 @@ class VoiceMemoViewModel(
                             "Restored $restored voice memos."
                         },
                     )
+                    if (result.restoredVoiceSamples > 0) append(" Your voice samples were restored too.")
                     if (result.remappedMemoCount > 0) {
                         append(" Existing copies were kept separately.")
                     }
@@ -1024,20 +1086,19 @@ class VoiceMemoViewModel(
                     .filter { it.id in ids }
                 val shareable = withContext(Dispatchers.IO) {
                     summaries.map { summary ->
-                        val transcriptSegments = if (payload != SharePayload.Audio) {
+                        val segments = if (payload != SharePayload.Audio) {
                             val detail = repository.observeMemo(summary.id).firstValue()
-                            detail?.timedSegments()
-                                .orEmpty()
-                                .map(TranscriptSegmentUi::text)
+                            detail?.timedSegments().orEmpty() to detail?.speakerJobId()
                         } else {
-                            emptyList()
+                            emptyList<TranscriptSegmentUi>() to null
                         }
                         ShareableMemo(
                             id = summary.id,
                             title = summary.title,
                             audioPath = summary.audioPath,
                             effectiveTranscript = summary.effectiveTranscript.takeIf(String::isNotBlank),
-                            transcriptSegments = transcriptSegments,
+                            transcriptSegments = segments.first.map(TranscriptSegmentUi::text),
+                            transcriptRows = shareRows(segments.first, segments.second),
                         )
                     }
                 }
@@ -1488,7 +1549,10 @@ class VoiceMemoViewModel(
                 timingLabel = timingLabel,
                 thermalStatusLabel = thermalStatusLabel,
                 realTimeFactorLabel = realTimeFactorLabel,
-                segments = timedSegments(),
+                segments = timedSegments().withSpeakers(local, speakerJobId()),
+                speakerStatus = speakerStatus(local, transcriptState.phase),
+                speakerProgress = local.speakers?.takeIf { it.jobId == speakerJobId() }?.progress,
+                joinSpeakerLines = local.joinSpeakerLines,
             ),
         )
     }
@@ -1637,9 +1701,6 @@ class VoiceMemoViewModel(
                     check(descriptor.declaredLength == WhisperAssets.MODEL_SIZE_BYTES)
                 }
             }
-            app.assets.openFd(ParakeetAssets.MODEL).use { descriptor ->
-                check(descriptor.declaredLength == ParakeetAssets.MODEL_SIZE_BYTES)
-            }
             app.assets.openFd(GraniteRecordingMetadataGenerator.MODEL_ASSET).use { descriptor ->
                 check(
                     descriptor.declaredLength ==
@@ -1650,8 +1711,8 @@ class VoiceMemoViewModel(
                 phase = ModelAvailabilityPhase.Available,
                 headline = "Local transcription ready",
                 supportingText =
-                    "Whisper, Parakeet, and Granite are bundled and run entirely " +
-                        "on this device.",
+                    "Whisper and Granite are bundled, Parakeet is installed separately, " +
+                        "and all of them run entirely on this device.",
             )
         }.getOrElse { error ->
             ModelAvailabilityUiState(
@@ -1719,6 +1780,12 @@ class VoiceMemoViewModel(
         val transcribeWhileRecordingEnabled: Boolean = false,
         val transcriptionTimingEnabled: Boolean = false,
         val transcriptionModelId: String = "whisper-large-v3-turbo",
+        val speakerLabelsEnabled: Boolean = false,
+        val joinSpeakerLines: Boolean = false,
+        val speakerPeople: List<com.example.voicememo.ui.SpeakerPersonUi> = emptyList(),
+        val voiceSampleRecording: com.example.voicememo.ui.VoiceSampleRecordingUi =
+            com.example.voicememo.ui.VoiceSampleRecordingUi(),
+        val speakers: SpeakerState? = null,
     ) {
         fun isBackupBusy(): Boolean =
             isExportingBackup ||
@@ -1726,6 +1793,18 @@ class VoiceMemoViewModel(
                 isBackupExportPickerOpen ||
                 isBackupRestorePickerOpen
     }
+
+    /** Speaker analysis of the transcription run whose segments are shown. */
+    private class SpeakerState(
+        val jobId: String,
+        val analysed: Boolean,
+        val timeline: SpeakerTimeline?,
+        val overrides: Map<String, SpeakerLabel>,
+        /** Queued or running in the background. */
+        val analysing: Boolean,
+        /** 0..1 once the analysis is actually running. */
+        val progress: Float?,
+    )
 
     private data class SemanticSearchState(
         val memoId: String,
@@ -1750,6 +1829,259 @@ class VoiceMemoViewModel(
     private companion object {
         const val LIBRARY_WAVEFORM_BUCKETS = 160
         const val DETAIL_WAVEFORM_BUCKETS = 260
+        const val VOICE_SAMPLE_GATE = "voice-sample"
+    }
+
+    /** The transcription run whose segments are shown; speaker data is stored per run. */
+    private fun MemoDetail.speakerJobId(): String? =
+        selectedJob?.id ?: latestJob?.takeIf { it.status == TranscriptionJobStatus.SUCCEEDED }?.id
+
+    private fun observeSpeakers() {
+        val dao = container.database.voiceMemoDao()
+        // Voice samples recorded with an earlier voice model are brought up to date once.
+        viewModelScope.launch { runCatching { container.speakerProfiles.upgradeRecordedSamples() } }
+        viewModelScope.launch {
+            combine(dao.observeSpeakerPersons(), dao.observeSpeakerVoiceSamples()) { persons, samples ->
+                persons.map { person ->
+                    com.example.voicememo.ui.SpeakerPersonUi(
+                        id = person.id,
+                        name = person.name,
+                        isSelf = person.isSelf,
+                        samples = samples
+                            .filter { it.personId == person.id && it.modelId == CamPlusPlusEmbedder.MODEL_ID }
+                            .map { sample ->
+                                val recorded = sample.origin == SpeakerVoiceSample.ORIGIN_RECORDED
+                                com.example.voicememo.ui.SpeakerSampleUi(
+                                    id = sample.id,
+                                    title = if (recorded) "Recorded voice sample" else "From a transcript line",
+                                    detail = "${dateFormat.format(Date(sample.createdAtMillis))} · " +
+                                        "${(sample.speechMillis + 500) / 1_000} s of speech",
+                                )
+                            },
+                    )
+                }
+            }.collect { people -> presentation.update { it.copy(speakerPeople = people) } }
+        }
+        viewModelScope.launch {
+            detail
+                .map { it?.speakerJobId() }
+                .distinctUntilChanged()
+                .flatMapLatest { jobId ->
+                    if (jobId == null) {
+                        flowOf(null)
+                    } else {
+                        combine(
+                            dao.observeSpeakerAnalysis(jobId),
+                            dao.observeSpeakerSegmentOverrides(jobId),
+                            container.workManager.getWorkInfosByTagFlow(SpeakerLabelWorker.jobTag(jobId)),
+                            container.speakerLabelIndex.progress,
+                        ) { analysis, overrides, work, running ->
+                            val progress = running?.takeIf { it.jobId == jobId }?.fraction
+                            SpeakerState(
+                                jobId = jobId,
+                                // An analysis by an earlier voice model keeps its labels but can be redone.
+                                analysed = analysis?.modelId == CamPlusPlusEmbedder.MODEL_ID,
+                                timeline = analysis?.timeline?.let(SpeakerTimeline::decode),
+                                overrides = overrides.associate { override ->
+                                    override.segmentId to SpeakerLabel.valueOf(override.label)
+                                },
+                                // Also true while a new transcription labels itself.
+                                analysing = progress != null || work.any { !it.state.isFinished },
+                                progress = progress,
+                            )
+                        }
+                    }
+                }
+                .collect { speakers -> presentation.update { it.copy(speakers = speakers) } }
+        }
+    }
+
+    private fun List<TranscriptSegmentUi>.withSpeakers(
+        local: PresentationState,
+        jobId: String?,
+    ): List<TranscriptSegmentUi> {
+        val speakers = local.speakers?.takeIf { local.speakerLabelsEnabled && it.jobId == jobId } ?: return this
+        return map { segment ->
+            val chosen = speakers.overrides[segment.id]
+            val label = chosen ?: speakers.timeline?.labelFor(segment.startMillis, segment.endMillis)
+            segment.copy(
+                speaker = when (label) {
+                    SpeakerLabel.ME -> com.example.voicememo.ui.SpeakerUi.Me
+                    SpeakerLabel.OTHER -> com.example.voicememo.ui.SpeakerUi.Other
+                    SpeakerLabel.MIXED -> com.example.voicememo.ui.SpeakerUi.Mixed
+                    SpeakerLabel.UNKNOWN, null -> null
+                },
+                speakerSetByUser = chosen != null,
+            )
+        }
+    }
+
+    private fun MemoDetail.speakerStatus(
+        local: PresentationState,
+        phase: TranscriptionPhase,
+    ): com.example.voicememo.ui.SpeakerLabelStatus {
+        val jobId = speakerJobId()
+        if (!BuildConfig.SPEAKER_LABELS_ENABLED || !local.speakerLabelsEnabled ||
+            jobId == null || phase != TranscriptionPhase.Complete || isPlainTextEdit()
+        ) {
+            return com.example.voicememo.ui.SpeakerLabelStatus.Hidden
+        }
+        val speakers = local.speakers?.takeIf { it.jobId == jobId }
+        return when {
+            speakers == null -> com.example.voicememo.ui.SpeakerLabelStatus.Hidden
+            speakers.analysing -> com.example.voicememo.ui.SpeakerLabelStatus.Analysing
+            !speakers.analysed -> com.example.voicememo.ui.SpeakerLabelStatus.NotAnalysed
+            speakers.timeline == null -> com.example.voicememo.ui.SpeakerLabelStatus.NoVoiceSample
+            else -> com.example.voicememo.ui.SpeakerLabelStatus.Labelled
+        }
+    }
+
+    /** Timed lines with their speaker for the CSV export; speakers stay empty when labels are off. */
+    private suspend fun shareRows(
+        segments: List<TranscriptSegmentUi>,
+        jobId: String?,
+    ): List<com.example.voicememo.sharing.ShareTranscriptRow> {
+        val labelled = BuildConfig.SPEAKER_LABELS_ENABLED && jobId != null &&
+            container.transcriptionPreferences.speakerLabelsEnabled
+        val dao = container.database.voiceMemoDao()
+        val timeline = if (labelled) dao.getSpeakerAnalysis(jobId!!)?.timeline?.let(SpeakerTimeline::decode) else null
+        val overrides = if (labelled) {
+            dao.getSpeakerSegmentOverrides(jobId!!).associate { it.segmentId to SpeakerLabel.valueOf(it.label) }
+        } else {
+            emptyMap()
+        }
+        return segments.map { segment ->
+            val label = overrides[segment.id] ?: timeline?.labelFor(segment.startMillis, segment.endMillis)
+            com.example.voicememo.sharing.ShareTranscriptRow(
+                startMillis = segment.startMillis,
+                endMillis = segment.endMillis,
+                speaker = when (label) {
+                    SpeakerLabel.ME -> "Me"
+                    SpeakerLabel.OTHER -> "Other"
+                    SpeakerLabel.MIXED -> "Both"
+                    SpeakerLabel.UNKNOWN, null -> null
+                },
+                text = segment.text,
+            )
+        }
+    }
+
+    private fun identifySpeakers() {
+        val memoId = presentation.value.selectedMemoId ?: return
+        val jobId = presentation.value.speakers?.jobId ?: return
+        SpeakerLabelWorker.enqueue(container.workManager, memoId, jobId)
+    }
+
+    /** [segmentIds] are one line, or the lines shown joined as one. */
+    private fun setSegmentSpeaker(segmentIds: List<String>, speaker: com.example.voicememo.ui.SpeakerUi?) {
+        val memoId = presentation.value.selectedMemoId ?: return
+        val speakers = presentation.value.speakers ?: return
+        val segments = uiState.value.detail?.transcript?.segments
+            ?.filter { it.id in segmentIds }
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        viewModelScope.launch {
+            runCatching {
+                val profiles = container.speakerProfiles
+                when (speaker) {
+                    com.example.voicememo.ui.SpeakerUi.Me -> {
+                        var learned = false
+                        for (segment in segments) {
+                            val result = profiles.addSegmentSample(
+                                personId = profiles.self().id,
+                                memoId = memoId,
+                                jobId = speakers.jobId,
+                                segmentId = segment.id,
+                                startMillis = segment.startMillis,
+                                endMillis = segment.endMillis,
+                            )
+                            if (result is SpeakerProfiles.SampleResult.Added) learned = true
+                        }
+                        mutableEffects.emitMessage(
+                            when {
+                                learned -> "Marked as you and added to your voice samples."
+                                segments.size > 1 ->
+                                    "Marked as you. These lines are too short to learn your voice from."
+                                else -> "Marked as you. This line is too short to learn your voice from."
+                            },
+                        )
+                    }
+
+                    com.example.voicememo.ui.SpeakerUi.Other, com.example.voicememo.ui.SpeakerUi.Mixed ->
+                        segments.forEach { segment ->
+                            profiles.setSegmentLabel(memoId, speakers.jobId, segment.id, SpeakerLabel.OTHER)
+                        }
+
+                    null -> segments.forEach { segment ->
+                        profiles.setSegmentLabel(memoId, speakers.jobId, segment.id, null)
+                    }
+                }
+            }.onFailure { mutableEffects.emitMessage("Could not change the speaker of this line.") }
+        }
+    }
+
+    private fun startVoiceSample() {
+        val recorder = container.voiceSampleRecorder
+        when {
+            presentation.value.voiceSampleRecording.let { it.isRecording || it.isProcessing } -> return
+            InferenceGate.isRecording -> {
+                viewModelScope.launch { mutableEffects.emitMessage("Finish the current recording first.") }
+                return
+            }
+
+            !recorder.hasPermission() -> {
+                viewModelScope.launch {
+                    mutableEffects.emitMessage(
+                        "Allow microphone access by starting a recording once, then try again.",
+                    )
+                }
+                return
+            }
+        }
+        stopVoiceSample.set(false)
+        presentation.update {
+            it.copy(voiceSampleRecording = com.example.voicememo.ui.VoiceSampleRecordingUi(isRecording = true))
+        }
+        viewModelScope.launch {
+            val profiles = container.speakerProfiles
+            val file = profiles.newSampleFile()
+            // Transcription and speaker analysis pause while the microphone is in use.
+            InferenceGate.recordingStarted(VOICE_SAMPLE_GATE)
+            val message = try {
+                val recording = recorder.record(file, stopVoiceSample::get) { elapsed ->
+                    presentation.update {
+                        it.copy(
+                            voiceSampleRecording = it.voiceSampleRecording.copy(
+                                elapsedSeconds = (elapsed / 1_000).toInt(),
+                            ),
+                        )
+                    }
+                }
+                InferenceGate.recordingStopped(VOICE_SAMPLE_GATE)
+                presentation.update {
+                    it.copy(
+                        voiceSampleRecording =
+                            com.example.voicememo.ui.VoiceSampleRecordingUi(isProcessing = true),
+                    )
+                }
+                when {
+                    recording == null -> "The microphone could not be used."
+                    profiles.addRecordedSample(profiles.self().id, file, recording.inputChannel)
+                        is SpeakerProfiles.SampleResult.Added -> "Voice sample added."
+                    else -> "Not enough clear speech. Speak for at least 10 seconds and try again."
+                }
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                file.delete()
+                "The voice sample could not be saved."
+            } finally {
+                InferenceGate.recordingStopped(VOICE_SAMPLE_GATE)
+                presentation.update {
+                    it.copy(voiceSampleRecording = com.example.voicememo.ui.VoiceSampleRecordingUi())
+                }
+            }
+            mutableEffects.emitMessage(message)
+        }
     }
 
     private fun MemoDetail.generatedSegments(): List<TranscriptSegmentUi> =

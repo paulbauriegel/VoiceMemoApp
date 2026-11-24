@@ -27,6 +27,9 @@ import com.example.voicememo.MainActivity
 import com.example.voicememo.R
 import com.example.voicememo.VoiceMemoApplication
 import com.example.voicememo.coordination.InferenceGate
+import com.example.voicememo.transcription.ParakeetModelFiles
+import com.example.voicememo.transcription.TranscriptionModel
+import com.example.voicememo.transcription.windowConfig
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -150,12 +153,21 @@ class RecordingService : Service() {
                             container.transcriptionPreferences.voiceActivityDetectionEnabled,
                         gpuAccelerationEnabled =
                             container.transcriptionPreferences.gpuAccelerationEnabled,
+                        transcriptionModelId = liveTranscriptionModel(
+                            selected = TranscriptionModel.fromId(
+                                container.transcriptionPreferences.transcriptionModelId,
+                            ),
+                            parakeetInstalled = ParakeetModelFiles.isInstalled(this@RecordingService),
+                        ).id,
                     )
                     preTranscriptionConfig = config
                     whisperWindowSpooler = runCatching {
                         WhisperWindowSpooler(
                             memoDirectory = requireNotNull(memoDirectory),
                             sampleRate = sampleRate,
+                            windowConfig = TranscriptionModel.fromId(
+                                config.transcriptionModelId,
+                            ).windowConfig(),
                         )
                     }.onFailure {
                         Log.e(TAG, "Could not prepare Whisper recording windows.", it)
@@ -180,6 +192,7 @@ class RecordingService : Service() {
                                 voiceActivityDetectionEnabled =
                                     config.voiceActivityDetectionEnabled,
                                 gpuAccelerationEnabled = config.gpuAccelerationEnabled,
+                                transcriptionModelId = config.transcriptionModelId,
                             )
                         }.onFailure {
                             Log.e(TAG, "Could not queue Whisper during recording.", it)
@@ -574,3 +587,14 @@ class RecordingService : Service() {
         private const val FALLBACK_SAMPLE_RATE = 48_000
     }
 }
+
+/** Parakeet transcribes live only when its side-installed model is present. */
+internal fun liveTranscriptionModel(
+    selected: TranscriptionModel,
+    parakeetInstalled: Boolean,
+): TranscriptionModel =
+    if (selected == TranscriptionModel.PARAKEET_TDT_0_6B_V3 && !parakeetInstalled) {
+        TranscriptionModel.WHISPER_LARGE_V3_TURBO
+    } else {
+        selected
+    }

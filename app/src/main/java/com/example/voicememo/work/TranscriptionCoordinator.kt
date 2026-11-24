@@ -19,6 +19,7 @@ interface TranscriptionCoordinator {
         timestampsEnabled: Boolean,
         voiceActivityDetectionEnabled: Boolean,
         gpuAccelerationEnabled: Boolean,
+        transcriptionModelId: String = TranscriptionModel.WHISPER_LARGE_V3_TURBO.id,
     )
 
     suspend fun enqueue(
@@ -43,6 +44,7 @@ class WorkManagerTranscriptionCoordinator(
         timestampsEnabled: Boolean,
         voiceActivityDetectionEnabled: Boolean,
         gpuAccelerationEnabled: Boolean,
+        transcriptionModelId: String,
     ) {
         val request = OneTimeWorkRequestBuilder<WhisperPreTranscriptionWorker>()
             .setInputData(
@@ -63,6 +65,10 @@ class WorkManagerTranscriptionCoordinator(
                     .putBoolean(
                         WhisperPreTranscriptionWorker.KEY_GPU_ACCELERATION_ENABLED,
                         gpuAccelerationEnabled,
+                    )
+                    .putString(
+                        WhisperPreTranscriptionWorker.KEY_TRANSCRIPTION_MODEL_ID,
+                        TranscriptionModel.fromId(transcriptionModelId).id,
                     )
                     .build(),
             )

@@ -56,6 +56,18 @@ data class LongFormChunk(
     val skippedByVad: Boolean = false,
 )
 
+/** The chunk's words with absolute times, for [ParakeetTranscriptMerger]. */
+fun LongFormChunk.timedWordWindow(): ParakeetTranscriptMerger.Window {
+    val startMillis = window.startSample * 1_000L / WhisperFeatureExtractor.SAMPLE_RATE
+    return ParakeetTranscriptMerger.Window(
+        startMillis = startMillis,
+        endMillis = window.endSample * 1_000L / WhisperFeatureExtractor.SAMPLE_RATE,
+        words = result.timedSegments.map { word ->
+            word.copy(startMillis = word.startMillis + startMillis, endMillis = word.endMillis + startMillis)
+        },
+    )
+}
+
 data class LongFormProgress(
     val chunkIndex: Int,
     val chunkCount: Int,
@@ -81,18 +93,23 @@ class LongFormTranscriber(
     private val engines: List<WhisperEngine>,
     private val voiceActivityDetector: VoiceActivityDetector? = null,
     private val lockAutoDetectedLanguage: Boolean = true,
-    private val trimOverlappingTokensAtMillis: Long? = null,
+    /**
+     * Join overlapping windows by their word timestamps ([ParakeetTranscriptMerger])
+     * instead of by token/text overlap. Every chunk must carry word-level
+     * [WhisperChunkResult.timedSegments] relative to its window start.
+     */
+    private val mergeTimedWords: Boolean = false,
 ) {
     constructor(
         engine: WhisperEngine,
         voiceActivityDetector: VoiceActivityDetector? = null,
         lockAutoDetectedLanguage: Boolean = true,
-        trimOverlappingTokensAtMillis: Long? = null,
+        mergeTimedWords: Boolean = false,
     ) : this(
         engines = listOf(engine),
         voiceActivityDetector = voiceActivityDetector,
         lockAutoDetectedLanguage = lockAutoDetectedLanguage,
-        trimOverlappingTokensAtMillis = trimOverlappingTokensAtMillis,
+        mergeTimedWords = mergeTimedWords,
     )
 
     init {
@@ -238,29 +255,24 @@ class LongFormTranscriber(
         val orderedChunks = chunks.mapIndexed { index, chunk ->
             requireNotNull(chunk) { "Whisper segment $index did not produce a result." }
         }
+        if (mergeTimedWords) {
+            val words = ParakeetTranscriptMerger.merge(
+                orderedChunks.map { chunk -> chunk.timedWordWindow() },
+            )
+            return LongFormTranscript(
+                text = ParakeetTranscriptMerger.text(words),
+                tokens = orderedChunks.flatMap { it.result.tokens },
+                detectedLanguage = forcedLanguage ?: "und",
+                chunks = orderedChunks,
+                warnings = orderedChunks.flatMap { it.result.warnings }.distinct(),
+            )
+        }
         var mergedTokens = emptyList<Int>()
         var mergedText = ""
         for (chunk in orderedChunks) {
             val result = chunk.result
-            val tokens = if (
-                chunk.window.index > 0 &&
-                trimOverlappingTokensAtMillis != null &&
-                result.timedSegments.size == result.tokens.size
-            ) {
-                result.tokens.filterIndexed { index, _ ->
-                    result.timedSegments[index].startMillis >= trimOverlappingTokensAtMillis
-                }
-            } else {
-                result.tokens
-            }
-            if (trimOverlappingTokensAtMillis == null) {
-                mergedTokens = TokenOverlapMerger.merge(mergedTokens, tokens)
-                mergedText = TextOverlapMerger.merge(mergedText, result.text)
-            } else {
-                mergedTokens = mergedTokens + tokens
-                val decoded = engines.first().decodeTokens(tokens).orEmpty()
-                mergedText = TextConcatenator.concatenate(mergedText, decoded)
-            }
+            mergedTokens = TokenOverlapMerger.merge(mergedTokens, result.tokens)
+            mergedText = TextOverlapMerger.merge(mergedText, result.text)
         }
         val containsTimestampTokens = orderedChunks.any { chunk ->
             WhisperTimestampTokens.containsTimestamp(

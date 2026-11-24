@@ -1,6 +1,9 @@
 package com.example.voicememo.recording
 
-import com.example.voicememo.transcription.WhisperChunker
+import com.example.voicememo.transcription.TranscriptionModel
+import com.example.voicememo.transcription.TranscriptionWindowConfig
+import com.example.voicememo.transcription.WhisperFeatureExtractor
+import com.example.voicememo.transcription.windowConfig
 import com.example.voicememo.work.WhisperPreTranscriptionStorage
 import java.io.Closeable
 import java.io.File
@@ -8,7 +11,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Copies only completed Whisper windows out of the microphone stream.
+ * Copies only completed model windows (Whisper 28 s every 26 s, Parakeet 30 s every
+ * 25 s) out of the microphone stream.
  *
  * Disk writes happen on a dedicated thread so model preparation can never
  * delay [AudioRecord.read] or the primary recording WAV.
@@ -16,13 +20,13 @@ import java.util.concurrent.TimeUnit
 internal class WhisperWindowSpooler(
     memoDirectory: File,
     private val sampleRate: Int,
+    windowConfig: TranscriptionWindowConfig = TranscriptionModel.DEFAULT.windowConfig(),
 ) : Closeable {
     private val directory = WhisperPreTranscriptionStorage.directory(memoDirectory).apply {
         mkdirs()
     }
-    private val payloadFrames = WhisperChunker.PAYLOAD_SECONDS * sampleRate
-    private val strideFrames =
-        (WhisperChunker.PAYLOAD_SECONDS - WhisperChunker.OVERLAP_SECONDS) * sampleRate
+    private val payloadFrames = framesAtRecordingRate(windowConfig.payloadSamples)
+    private val strideFrames = framesAtRecordingRate(windowConfig.strideSamples)
     private val ring = ShortArray(payloadFrames)
     private val writer = Executors.newSingleThreadExecutor { task ->
         Thread(task, "whisper-window-spooler").apply { priority = Thread.MIN_PRIORITY }
@@ -63,6 +67,13 @@ internal class WhisperWindowSpooler(
         check(writer.awaitTermination(30, TimeUnit.SECONDS)) {
             "Timed out finalizing Whisper recording windows."
         }
+    }
+
+    private fun framesAtRecordingRate(samples16Khz: Int): Int {
+        require(samples16Khz % WhisperFeatureExtractor.SAMPLE_RATE == 0) {
+            "Recording windows must be whole seconds."
+        }
+        return samples16Khz / WhisperFeatureExtractor.SAMPLE_RATE * sampleRate
     }
 
     private fun copyIntoRing(samples: ShortArray, sourceOffset: Int, count: Int) {

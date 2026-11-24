@@ -30,7 +30,6 @@ import com.example.voicememo.transcription.GraniteRecordingMetadataGenerator
 import com.example.voicememo.transcription.LiteRtWhisperBackendFactory
 import com.example.voicememo.transcription.LiteRtFullGpuWhisperEngine
 import com.example.voicememo.transcription.LiteRtWhisperEngine
-import com.example.voicememo.transcription.LiteRtParakeetEngine
 import com.example.voicememo.transcription.LongFormChunk
 import com.example.voicememo.transcription.LongFormTranscriber
 import com.example.voicememo.transcription.SileroVoiceActivityDetector
@@ -47,7 +46,9 @@ import com.example.voicememo.transcription.WhisperLanguage
 import com.example.voicememo.transcription.WhisperAssets
 import com.example.voicememo.transcription.WhisperTokenizer
 import com.example.voicememo.transcription.ParakeetInferenceFingerprint
+import com.example.voicememo.transcription.TimedWordsCodec
 import com.example.voicememo.transcription.TranscriptionModel
+import com.example.voicememo.transcription.openParakeetEngineSet
 import com.example.voicememo.transcription.windowConfig
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -94,7 +95,6 @@ class TranscriptionWorker(
         )
         val usePreTranscribedWindows = shouldUsePreTranscribedWindows(
             reuseRecordingStageResults = recordingStageResultsRequested,
-            transcriptionModel = transcriptionModel,
         )
         var benchmark: TranscriptionBenchmark? = null
 
@@ -172,10 +172,7 @@ class TranscriptionWorker(
                         updatedAtMillis = System.currentTimeMillis(),
                     ),
                 )
-                if (
-                    usePreTranscribedWindows &&
-                    transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO
-                ) {
+                if (usePreTranscribedWindows) {
                     windows.forEach { window ->
                         WhisperPreTranscriptionStorage.readResult(
                             directory = stagedPreTranscriptionDirectory,
@@ -186,6 +183,7 @@ class TranscriptionWorker(
                                 originalJob = job,
                                 memoId = memoId,
                                 chunk = LongFormChunk(window = window, result = result),
+                                transcriptionModel = transcriptionModel,
                             )
                         }
                     }
@@ -270,6 +268,12 @@ class TranscriptionWorker(
                             timestampsEnabled = timestampsEnabled,
                         )
                         engineLease = container.whisperEngineCache.acquire(cacheKey) {
+                            if (transcriptionModel == TranscriptionModel.PARAKEET_TDT_0_6B_V3) {
+                                return@acquire openParakeetEngineSet(
+                                    applicationContext,
+                                    requestedBackend,
+                                )
+                            }
                             var selectedBackend = if (
                                 requestedBackend == WhisperBackendRequest.GPU
                             ) {
@@ -278,23 +282,7 @@ class TranscriptionWorker(
                                 WhisperBackendSelection.cpuRequested()
                             }
                             val opened = WhisperEnginePoolLoader.open(workerCount) {
-                                if (
-                                    transcriptionModel ==
-                                    TranscriptionModel.PARAKEET_TDT_0_6B_V3
-                                ) {
-                                    LiteRtParakeetEngine.open(
-                                        context = applicationContext,
-                                        backend = requestedBackend,
-                                    ).also {
-                                        if (requestedBackend == WhisperBackendRequest.GPU) {
-                                            selectedBackend = WhisperBackendSelection.gpuSelected(
-                                                com.example.voicememo.transcription
-                                                    .WhisperRuntimeBackend
-                                                    .GPU_COMPILED_MODEL_AUTO,
-                                            )
-                                        }
-                                    }
-                                } else if (requestedBackend == WhisperBackendRequest.GPU) {
+                                if (requestedBackend == WhisperBackendRequest.GPU) {
                                     LiteRtWhisperBackendFactory
                                         .openExperimentalGpuWithCpuFallback(
                                             context = applicationContext,
@@ -341,15 +329,9 @@ class TranscriptionWorker(
                             lockAutoDetectedLanguage =
                                 transcriptionModel ==
                                     TranscriptionModel.WHISPER_LARGE_V3_TURBO,
-                            trimOverlappingTokensAtMillis =
-                                if (
-                                    transcriptionModel ==
-                                    TranscriptionModel.PARAKEET_TDT_0_6B_V3
-                                ) {
-                                    2_500L
-                                } else {
-                                    null
-                                },
+                            mergeTimedWords =
+                                transcriptionModel ==
+                                    TranscriptionModel.PARAKEET_TDT_0_6B_V3,
                         ).transcribeBatches(
                             windows = windows,
                             loadAudio = { window ->
@@ -494,7 +476,7 @@ class TranscriptionWorker(
                                 }
                                 benchmark?.segmentCompleted(chunk)
                                 runBlocking {
-                                    persistChunk(job, memoId, chunk)
+                                    persistChunk(job, memoId, chunk, transcriptionModel)
                                     pauseAtSafeBoundaryIfRecording(
                                         jobId = job.id,
                                         resumePhase = TranscriptionPhase.ENCODING,
@@ -572,6 +554,7 @@ class TranscriptionWorker(
             )
             indexForSemanticSearch(memoId, job.id)
             benchmark?.finish(outcome = "SUCCESS")
+            labelSpeakers(memoId, job.id, File(memo.audioPath))
             return Result.success()
         } catch (cancelled: CancellationException) {
             benchmark?.finish(outcome = "CANCELLED", errorCode = "COROUTINE_CANCELLED")
@@ -632,10 +615,54 @@ class TranscriptionWorker(
         }
     }
 
+    /**
+     * Labels who is speaking ("me / others") in the finished recording. It is
+     * an add-on after the transcript is saved: it never changes the transcript,
+     * and a failure, an active recording or a stopped worker only leaves the
+     * labels missing. Analysed windows are kept, so a later run continues.
+     */
+    private suspend fun labelSpeakers(memoId: String, jobId: String, audioFile: File) {
+        if (!BuildConfig.SPEAKER_LABELS_ENABLED ||
+            !container.transcriptionPreferences.speakerLabelsEnabled ||
+            InferenceGate.isRecording
+        ) {
+            return
+        }
+        try {
+            setForeground(foregroundInfo("Identifying speakers", progress = 0f))
+            val result = container.speakerLabelIndex.analyse(
+                memoId = memoId,
+                jobId = jobId,
+                audioFile = audioFile,
+                shouldPause = { isStopped || InferenceGate.isRecording },
+            ) { window, windows ->
+                if (window % SPEAKER_PROGRESS_WINDOWS == 0) {
+                    setForeground(
+                        foregroundInfo("Identifying speakers", progress = window.toFloat() / windows),
+                    )
+                }
+            }
+            if (result == null) {
+                Log.i(TAG, "Speaker labelling paused; it continues with the next run.")
+            } else {
+                Log.i(
+                    TAG,
+                    "Speaker labels: ${result.windows} windows, ${result.voiceprints} voiceprints in " +
+                        "${result.analysisMillis} ms, labelled=${result.labelled}.",
+                )
+            }
+        } catch (failure: Throwable) {
+            // Deliberately includes cancellation: the transcript is already saved,
+            // and rethrowing would make the caller requeue a finished job.
+            Log.w(TAG, "Speaker labelling did not finish.", failure)
+        }
+    }
+
     private suspend fun persistChunk(
         originalJob: TranscriptionJob,
         memoId: String,
         chunk: LongFormChunk,
+        transcriptionModel: TranscriptionModel,
     ) {
         val result = chunk.result
         repository.upsertTranscriptChunk(
@@ -655,6 +682,11 @@ class TranscriptionWorker(
                 warning = result.warnings.takeIf(List<String>::isNotEmpty)?.joinToString("\n"),
                 completedAtMillis = System.currentTimeMillis(),
                 inferenceMillis = result.inferenceMillis,
+                timedWordsJson = if (transcriptionModel == TranscriptionModel.PARAKEET_TDT_0_6B_V3) {
+                    TimedWordsCodec.encode(result.timedSegments)
+                } else {
+                    null
+                },
             ),
         )
         val persisted = repository.getTranscriptionJob(originalJob.id) ?: return
@@ -726,6 +758,7 @@ class TranscriptionWorker(
                 inferenceMillis = 0L,
                 truncated = truncated,
                 warnings = warning?.let(::listOf).orEmpty(),
+                timedSegments = TimedWordsCodec.decode(timedWordsJson).orEmpty(),
             ),
         )
     }
@@ -836,6 +869,7 @@ class TranscriptionWorker(
         const val KEY_MEMO_ID = "memo_id"
         const val KEY_TIMESTAMPS_ENABLED = "timestamps_enabled"
         const val KEY_VAD_ENABLED = "vad_enabled"
+        private const val SPEAKER_PROGRESS_WINDOWS = 20
         const val KEY_GPU_ACCELERATION_ENABLED = "gpu_acceleration_enabled"
         const val KEY_TRANSCRIPTION_MODEL_ID = "transcription_model_id"
         const val KEY_USE_PRETRANSCRIBED_WINDOWS = "use_pretranscribed_windows"
@@ -865,12 +899,14 @@ internal fun maximumThermalStatus(
     else -> maxOf(previous, current)
 }
 
+/**
+ * Results staged while recording are reused only for the post-recording handoff. Whisper and
+ * Parakeet each spool their own window shape, and every staged result carries the inference
+ * fingerprint, so a result from another model or configuration is never read back.
+ */
 internal fun shouldUsePreTranscribedWindows(
     reuseRecordingStageResults: Boolean,
-    transcriptionModel: TranscriptionModel,
-): Boolean =
-    transcriptionModel == TranscriptionModel.WHISPER_LARGE_V3_TURBO &&
-        reuseRecordingStageResults
+): Boolean = reuseRecordingStageResults
 
 internal fun transcriptionWorkerCount(
     transcriptionModel: TranscriptionModel,

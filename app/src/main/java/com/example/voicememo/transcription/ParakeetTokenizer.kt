@@ -38,6 +38,29 @@ internal class ParakeetTokenizer private constructor(
         return output.toString().trim()
     }
 
+    /**
+     * Groups timed tokens into display words: a piece starting with the SentencePiece
+     * metaspace opens a new word; continuation and byte-fallback pieces join the current one.
+     */
+    fun words(tokens: List<ParakeetTimedToken>): List<WhisperTimedSegment> {
+        val words = mutableListOf<WhisperTimedSegment>()
+        var group = mutableListOf<ParakeetTimedToken>()
+        fun flush() {
+            if (group.isEmpty()) return
+            val text = decode(group.map(ParakeetTimedToken::id))
+            if (text.isNotEmpty()) {
+                words += WhisperTimedSegment(group.first().startMillis, group.last().endMillis, text)
+            }
+            group = mutableListOf()
+        }
+        tokens.forEach { token ->
+            if (pieces.getOrNull(token.id)?.startsWith(METASPACE) == true) flush()
+            group += token
+        }
+        flush()
+        return words
+    }
+
     companion object {
         private const val METASPACE = "\u2581"
         private val BYTE_TOKEN = Regex("<0x([0-9A-Fa-f]{2})>")

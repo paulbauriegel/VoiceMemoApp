@@ -32,6 +32,14 @@ data class VoiceMemoAppUiState(
     val transcribeWhileRecordingEnabled: Boolean = false,
     val transcriptionTimingEnabled: Boolean = false,
     val transcriptionModelId: String = "whisper-large-v3-turbo",
+    val parakeetInstalled: Boolean = false,
+    /** False when the build leaves the speaker models out. */
+    val speakerLabelsAvailable: Boolean = false,
+    val speakerLabelsEnabled: Boolean = false,
+    /** Show consecutive lines of one speaker as one longer line. */
+    val joinSpeakerLines: Boolean = false,
+    val speakerPeople: List<SpeakerPersonUi> = emptyList(),
+    val voiceSampleRecording: VoiceSampleRecordingUi = VoiceSampleRecordingUi(),
     val recorder: RecorderUiState = RecorderUiState(),
     val detail: VoiceMemoDetailUi? = null,
     val modelAvailability: ModelAvailabilityUiState = ModelAvailabilityUiState(),
@@ -137,6 +145,36 @@ enum class TranscriptionPhase {
 
 data class TranscriptVersionUi(val id: String, val label: String, val selected: Boolean)
 
+/** Who speaks in a transcript line. */
+enum class SpeakerUi { Me, Other, Mixed }
+
+/** Where speaker labels stand for the open transcript. */
+enum class SpeakerLabelStatus {
+    /** Switched off, or nothing to label. */
+    Hidden,
+    /** The recording has not been analysed yet; the user can start it. */
+    NotAnalysed,
+    Analysing,
+    /** Analysed, but no voice sample exists to recognise the user with. */
+    NoVoiceSample,
+    Labelled,
+}
+
+data class SpeakerSampleUi(val id: String, val title: String, val detail: String)
+
+data class SpeakerPersonUi(
+    val id: String,
+    val name: String,
+    val isSelf: Boolean,
+    val samples: List<SpeakerSampleUi>,
+)
+
+data class VoiceSampleRecordingUi(
+    val isRecording: Boolean = false,
+    val elapsedSeconds: Int = 0,
+    val isProcessing: Boolean = false,
+)
+
 data class TranscriptDetailUi(
     val phase: TranscriptionPhase = TranscriptionPhase.NotRequested,
     val progress: Float? = null,
@@ -163,6 +201,11 @@ data class TranscriptDetailUi(
     /** Latest semantic find-in-transcript result, if any. */
     val semanticSearch: SemanticSearchUi? = null,
     val versions: List<TranscriptVersionUi> = emptyList(),
+    val speakerStatus: SpeakerLabelStatus = SpeakerLabelStatus.Hidden,
+    /** 0..1 while [SpeakerLabelStatus.Analysing]; null when waiting to start. */
+    val speakerProgress: Float? = null,
+    /** Show consecutive lines of one speaker as one longer line (display only). */
+    val joinSpeakerLines: Boolean = false,
 )
 
 /** Segments related in meaning to [query], best first. */
@@ -179,6 +222,10 @@ data class TranscriptSegmentUi(
     val endLabel: String,
     val text: String,
     val isEdited: Boolean = false,
+    /** Null when unknown or when speaker labels are off. */
+    val speaker: SpeakerUi? = null,
+    /** The user chose [speaker] for this line. */
+    val speakerSetByUser: Boolean = false,
 )
 
 data class LanguageUi(
@@ -298,6 +345,20 @@ sealed interface VoiceMemoUiAction {
     data class TranscribeWhileRecordingChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class TranscriptionTimingChanged(val enabled: Boolean) : VoiceMemoUiAction
     data class TranscriptionModelChanged(val modelId: String) : VoiceMemoUiAction
+    data class SpeakerLabelsChanged(val enabled: Boolean) : VoiceMemoUiAction
+    data class JoinSpeakerLinesChanged(val enabled: Boolean) : VoiceMemoUiAction
+    object StartVoiceSample : VoiceMemoUiAction
+    object StopVoiceSample : VoiceMemoUiAction
+    data class DeleteVoiceSample(val sampleId: String) : VoiceMemoUiAction
+    /** The user's own choice for a transcript line; null clears it. Me also teaches the voice. */
+    data class SetSegmentSpeaker(
+        val segmentId: String,
+        val speaker: SpeakerUi?,
+        /** Further lines shown joined with [segmentId]; they get the same speaker. */
+        val joinedSegmentIds: List<String> = emptyList(),
+    ) : VoiceMemoUiAction
+    /** Analyses the open recording's speakers in the background. */
+    object IdentifySpeakers : VoiceMemoUiAction
 
     object BeginTitleEdit : VoiceMemoUiAction
     data class TitleDraftChanged(val title: String) : VoiceMemoUiAction

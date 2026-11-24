@@ -176,6 +176,7 @@ add_library(
     voicememo_whispercpp_benchmark
     SHARED
     whispercpp_benchmark_jni.cpp
+    parakeet_benchmark_jni.cpp
 )
 
 target_compile_features(voicememo_whispercpp_benchmark PRIVATE cxx_std_17)
@@ -188,6 +189,7 @@ target_link_libraries(
     voicememo_whispercpp_benchmark
     PRIVATE
     whisper
+    parakeet
     ggml
     android
     log

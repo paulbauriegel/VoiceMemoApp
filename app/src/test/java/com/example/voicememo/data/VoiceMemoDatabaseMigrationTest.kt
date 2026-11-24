@@ -29,6 +29,57 @@ class VoiceMemoDatabaseMigrationTest {
     }
 
     @Test
+    fun migrationThirteenToFourteenOnlyCreatesTheSchemaFourteenSpeakerTables() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+        VoiceMemoDatabase.MIGRATION_13_14.migrate(database)
+
+        // Every statement must be exactly what Room recorded for version 14.
+        val schema = java.io.File("schemas/com.example.voicememo.data.VoiceMemoDatabase/14.json")
+            .readText()
+            .replace("`", "")
+        val tables = executedSql.filter { it.startsWith("CREATE TABLE IF NOT EXISTS speaker_") }
+        val indices = executedSql.filter { it.startsWith("CREATE INDEX IF NOT EXISTS index_speaker_") }
+        assertEquals(executedSql.size, tables.size + indices.size)
+        assertEquals(5, tables.size)
+        assertEquals(5, Regex("\"tableName\": \"speaker_").findAll(schema).count())
+        assertEquals(4, indices.size)
+        for (statement in executedSql) {
+            val table = if (statement.startsWith("CREATE TABLE")) {
+                statement.substringAfter("EXISTS ").substringBefore(" (")
+            } else {
+                statement.substringAfter(" ON ").substringBefore(" (")
+            }
+            // Room keeps the table name inside index names and the name before " (".
+            val recorded = statement.replace(" $table (", " \${TABLE_NAME} (")
+            assertTrue(statement, schema.contains("\"createSql\": \"$recorded\""))
+        }
+    }
+
+    @Test
+    fun migrationTwelveToThirteenOnlyAddsNullableTimedWordsColumn() {
+        val executedSql = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") executedSql += arguments?.first() as String
+            defaultValue(method.returnType)
+        } as SupportSQLiteDatabase
+        VoiceMemoDatabase.MIGRATION_12_13.migrate(database)
+        assertEquals(
+            listOf("ALTER TABLE transcript_chunks ADD COLUMN timedWordsJson TEXT"),
+            executedSql,
+        )
+    }
+
+    @Test
     fun migrationOneToTwoOnlyAddsNullableFingerprintColumn() {
         val executedSql = mutableListOf<String>()
         val database = Proxy.newProxyInstance(

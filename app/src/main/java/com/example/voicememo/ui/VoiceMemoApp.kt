@@ -187,6 +187,12 @@ private fun VoiceMemoAdaptiveContent(
                         uiState.transcribeWhileRecordingEnabled,
                     transcriptionTimingEnabled = uiState.transcriptionTimingEnabled,
                     transcriptionModelId = uiState.transcriptionModelId,
+                    parakeetInstalled = uiState.parakeetInstalled,
+                    speakerLabelsAvailable = uiState.speakerLabelsAvailable,
+                    speakerLabelsEnabled = uiState.speakerLabelsEnabled,
+                    joinSpeakerLines = uiState.joinSpeakerLines,
+                    speakerPeople = uiState.speakerPeople,
+                    voiceSampleRecording = uiState.voiceSampleRecording,
                     onAction = onAction,
                 )
             }

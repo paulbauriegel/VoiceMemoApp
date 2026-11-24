@@ -1,31 +1,48 @@
 package com.example.voicememo.transcription
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
-import com.google.ai.edge.litert.TensorBuffer
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
 
 /**
- * LiteRT implementation of the pinned stateful Parakeet TDT graph.
+ * Parakeet TDT 0.6B v3 on LiteRT for one window of up to 30 seconds.
  *
- * The decode loop follows Google's LiteRT speech-recognition sample: it begins
- * with the 64-token stateless signature, then switches to `decode_1` while
- * swapping the recurrent state buffers.
+ * Split export: the encoder file holds `encode` (GPU, F32_F16 with CPU fallback for the few
+ * unsupported ops); the decoder file holds `predict` (LSTM, run only after an emission) and
+ * `joint` (one frame, argmax in-graph, returns token and duration index). Greedy TDT decoding
+ * follows NeMo: blank 8192, durations 0-4, at most 10 symbols per frame.
+ *
+ * Each chunk is decoded once and then gap-repaired ([ParakeetGapRepair]). Results carry
+ * word-level timed segments relative to the chunk start; windows are joined by
+ * [ParakeetTranscriptMerger].
  */
 internal class LiteRtParakeetEngine private constructor(
-    private val model: CompiledModel,
+    private val encoderModel: CompiledModel,
+    private val decoderModel: CompiledModel,
     private val tokenizer: ParakeetTokenizer,
-    private val featureExtractor: ParakeetFeatureExtractor,
-    private val encodeInputs: List<TensorBuffer>,
-    private val encodeOutputs: List<TensorBuffer>,
-    private val decodeInputs: List<TensorBuffer>,
-    private val decodeOutputs: List<TensorBuffer>,
-    private val decodeOneInputs: List<TensorBuffer>,
-    private val decodeOneOutputs: List<TensorBuffer>,
+    val usesGpu: Boolean,
 ) : WhisperEngine {
     private val closed = AtomicBoolean(false)
     private val inferenceLock = Any()
+    private val encodeInputs = listOf(
+        encoderModel.createInputBuffer("args_0", ENCODE),
+        encoderModel.createInputBuffer("args_1", ENCODE),
+    )
+    private val encodeOutputs = listOf(encoderModel.createOutputBuffer("output_0", ENCODE))
+    private val predictInputs = listOf("args_0", "args_1", "args_2").map {
+        decoderModel.createInputBuffer(it, PREDICT)
+    }
+    private val predictOutputs = listOf("output_0", "output_1", "output_2").map {
+        decoderModel.createOutputBuffer(it, PREDICT)
+    }
+    private val jointInputs = listOf("args_0", "args_1").map { decoderModel.createInputBuffer(it, JOINT) }
+    private val jointOutputs = listOf("output_0", "output_1").map { decoderModel.createOutputBuffer(it, JOINT) }
+    private val tokenInput = IntArray(1)
+    private val frame = FloatArray(ENCODED_FEATURES)
 
     override fun transcribeChunk(
         audio: FloatArray,
@@ -33,23 +50,25 @@ internal class LiteRtParakeetEngine private constructor(
         shouldCancel: () -> Boolean,
         onTokenProgress: (generated: Int, limit: Int) -> Unit,
     ): WhisperChunkResult = synchronized(inferenceLock) {
-        check(!closed.get()) { "Parakeet engine is closed." }
+        checkCancellation(shouldCancel)
         require(audio.size <= ParakeetAssets.MAX_SAMPLES) {
-            "Parakeet accepts at most five seconds of 16 kHz PCM."
+            "Parakeet accepts at most 30 seconds of 16 kHz PCM."
         }
-        checkCancellation(shouldCancel)
         val started = System.nanoTime()
-
-        encodeInputs[0].writeFloat(featureExtractor.extract(audio))
-        model.run(encodeInputs, encodeOutputs, ENCODE_SIGNATURE)
-        checkCancellation(shouldCancel)
-
-        val decoded = decode(shouldCancel, onTokenProgress)
-        val tokenIds = decoded.map(DecodedToken::id)
-        val text = tokenizer.decode(tokenIds)
+        val tokens = if (audio.isEmpty()) {
+            emptyList()
+        } else {
+            val initial = decode(audio, 0, audio.size, shouldCancel)
+            onTokenProgress(PROGRESS_DECODED, PROGRESS_LIMIT)
+            ParakeetGapRepair.repair(audio, initial) { start, end ->
+                decode(audio, start, end, shouldCancel)
+            }.tokens
+        }
+        onTokenProgress(PROGRESS_LIMIT, PROGRESS_LIMIT)
+        val ids = tokens.map(ParakeetTimedToken::id)
         WhisperChunkResult(
-            tokens = tokenIds,
-            text = text,
+            tokens = ids,
+            text = tokenizer.decode(ids),
             detectedLanguage = (language as? WhisperLanguage.Forced)?.code ?: "und",
             inferenceMillis = (System.nanoTime() - started) / 1_000_000L,
             truncated = false,
@@ -61,175 +80,172 @@ internal class LiteRtParakeetEngine private constructor(
             } else {
                 emptyList()
             },
-            timedSegments = decoded.map { token ->
-                WhisperTimedSegment(
-                    startMillis = token.timeIndex * ParakeetAssets.INPUT_SECONDS * 1_000L /
-                        ENCODED_TIME_STEPS,
-                    endMillis = (token.timeIndex + 1) *
-                        ParakeetAssets.INPUT_SECONDS * 1_000L / ENCODED_TIME_STEPS,
-                    text = tokenizer.decode(listOf(token.id)),
-                )
-            },
+            timedSegments = tokenizer.words(tokens),
         )
     }
 
     override fun decodeTokens(tokens: List<Int>): String = tokenizer.decode(tokens)
 
     override fun close() {
-        if (closed.compareAndSet(false, true)) {
-            (
-                encodeInputs + encodeOutputs + decodeInputs + decodeOutputs +
-                    decodeOneInputs + decodeOneOutputs
-                ).distinct().asReversed().forEach { buffer ->
-                runCatching(buffer::close)
-            }
-            model.close()
+        if (!closed.compareAndSet(false, true)) return
+        // A running decode notices the flag at its next frame and throws; wait for it.
+        synchronized(inferenceLock) {
+            (encodeInputs + encodeOutputs + predictInputs + predictOutputs + jointInputs + jointOutputs)
+                .asReversed()
+                .forEach { runCatching(it::close) }
+            decoderModel.close()
+            encoderModel.close()
         }
     }
 
+    /** Decodes audio[start, end) and returns tokens with times relative to audio[0]. */
     private fun decode(
+        audio: FloatArray,
+        start: Int,
+        end: Int,
         shouldCancel: () -> Boolean,
-        onTokenProgress: (generated: Int, limit: Int) -> Unit,
-    ): List<DecodedToken> {
-        val maximumTimeIndex = encodeOutputs[0].readFloat().size / ENCODED_FEATURES
-        val tokenSlots = decodeInputs[1].readInt().size
-        val logitsPerToken =
-            decodeOutputs[0].readFloat().size / tokenSlots / maximumTimeIndex
-        require(logitsPerToken == ParakeetAssets.BLANK_TOKEN_ID + 1 + DURATION_COUNT) {
-            "Unexpected Parakeet logits width: $logitsPerToken."
+    ): List<ParakeetTimedToken> {
+        val features = ParakeetFrontend.extract(audio, start, end)
+        checkCancellation(shouldCancel)
+        encodeInputs[0].writeFloat(features.values)
+        encodeInputs[1].writeInt(features.mask)
+        encoderModel.run(encodeInputs, encodeOutputs, ENCODE)
+        checkCancellation(shouldCancel)
+        val encoded = encodeOutputs[0].readFloat()
+        val valid = min(encoded.size / ENCODED_FEATURES, (features.validMelFrames - 1) / SUBSAMPLING + 1)
+        val offsetMillis = start.toLong() * 1_000L / ParakeetAssets.SAMPLE_RATE
+
+        var hidden = FloatArray(STATE_SIZE)
+        var cell = FloatArray(STATE_SIZE)
+        predict(ParakeetAssets.BLANK_TOKEN_ID, hidden, cell).let { (output, h, c) ->
+            jointInputs[1].writeFloat(output)
+            hidden = h
+            cell = c
         }
-
-        val stateSize = decodeInputs[2].readFloat().size
-        val zeroState = FloatArray(stateSize)
-        val stateBuffers = listOf(
-            listOf(decodeInputs[2], decodeInputs[3]),
-            listOf(decodeOutputs[1], decodeOutputs[2]),
-        )
-        var inputStateIndex = 0
-        stateBuffers[inputStateIndex].forEach { it.writeFloat(zeroState) }
-
-        var signature = DECODE_SIGNATURE
-        var inferenceTokenSlots = tokenSlots
-        var tokenBuffer = decodeInputs[1]
-        var tokenInput = IntArray(tokenSlots)
-        tokenInput[0] = ParakeetAssets.BLANK_TOKEN_ID
-        var logitsBuffer = decodeOutputs[0]
-        var tokenIndex = 0
-        var timeIndex = 0
-        val generated = mutableListOf<DecodedToken>()
-
-        while (timeIndex < maximumTimeIndex) {
-            checkCancellation(shouldCancel)
-            tokenBuffer.writeInt(tokenInput)
-            model.run(
-                buildList {
-                    addAll(encodeOutputs)
-                    add(tokenBuffer)
-                    addAll(stateBuffers[inputStateIndex])
-                },
-                listOf(logitsBuffer) + stateBuffers[1 - inputStateIndex],
-                signature,
-            )
-            checkCancellation(shouldCancel)
-
-            val logits = logitsBuffer.readFloat()
-            val rowStart =
-                timeIndex * inferenceTokenSlots * logitsPerToken + tokenIndex * logitsPerToken
-            val tokenEnd = rowStart + logitsPerToken - DURATION_COUNT
-            val rowEnd = rowStart + logitsPerToken
-            val tokenId = argmax(logits, rowStart, tokenEnd) - rowStart
-            if (tokenId != ParakeetAssets.BLANK_TOKEN_ID) {
-                generated += DecodedToken(tokenId, timeIndex)
-                onTokenProgress(generated.size, TOKEN_PROGRESS_LIMIT)
-                if (inferenceTokenSlots > 1) {
-                    tokenIndex++
-                    if (tokenIndex == inferenceTokenSlots - 1) {
-                        signature = DECODE_ONE_SIGNATURE
-                        inferenceTokenSlots = 1
-                        tokenBuffer = decodeOneInputs[1]
-                        tokenInput = IntArray(1)
-                        logitsBuffer = decodeOneOutputs[0]
-                        tokenIndex = 0
-                    }
-                }
-                tokenInput[tokenIndex] = tokenId
+        val out = mutableListOf<ParakeetTimedToken>()
+        var time = 0
+        var symbols = 0
+        var steps = 0
+        while (time < valid) {
+            if (++steps % CANCEL_CHECK_STEPS == 0) checkCancellation(shouldCancel)
+            encoded.copyInto(frame, 0, time * ENCODED_FEATURES, (time + 1) * ENCODED_FEATURES)
+            jointInputs[0].writeFloat(frame)
+            decoderModel.run(jointInputs, jointOutputs, JOINT)
+            val token = jointOutputs[0].readInt()[0]
+            var duration = DURATIONS[jointOutputs[1].readInt()[0]]
+            if (token != ParakeetAssets.BLANK_TOKEN_ID) {
+                out += ParakeetTimedToken(
+                    id = token,
+                    startMillis = offsetMillis + time * ParakeetAssets.FRAME_MILLIS,
+                    endMillis = offsetMillis + (time + duration) * ParakeetAssets.FRAME_MILLIS,
+                )
+                symbols++
+                if (duration == 0 && symbols >= MAX_SYMBOLS_PER_STEP) duration = 1
+                val (output, h, c) = predict(token, hidden, cell)
+                jointInputs[1].writeFloat(output)
+                hidden = h
+                cell = c
+            } else if (duration == 0) {
+                duration = 1
             }
-
-            val duration = argmax(logits, tokenEnd, rowEnd) - tokenEnd
-            timeIndex += if (duration == 0 && tokenId == ParakeetAssets.BLANK_TOKEN_ID) {
-                1
-            } else {
-                duration
-            }
-            if (inferenceTokenSlots == 1) inputStateIndex = 1 - inputStateIndex
+            if (duration > 0) symbols = 0
+            time += duration
         }
-        return generated
+        return out
+    }
+
+    private fun predict(token: Int, hidden: FloatArray, cell: FloatArray): Triple<FloatArray, FloatArray, FloatArray> {
+        tokenInput[0] = token
+        predictInputs[0].writeInt(tokenInput)
+        predictInputs[1].writeFloat(hidden)
+        predictInputs[2].writeFloat(cell)
+        decoderModel.run(predictInputs, predictOutputs, PREDICT)
+        return Triple(predictOutputs[0].readFloat(), predictOutputs[1].readFloat(), predictOutputs[2].readFloat())
     }
 
     private fun checkCancellation(shouldCancel: () -> Boolean) {
         if (closed.get() || shouldCancel()) throw WhisperCancelledException()
     }
 
-    private fun argmax(values: FloatArray, start: Int, endExclusive: Int): Int {
-        var best = start
-        for (index in start + 1 until endExclusive) {
-            if (values[index] > values[best]) best = index
-        }
-        return best
-    }
-
-    private data class DecodedToken(
-        val id: Int,
-        val timeIndex: Int,
-    )
-
     companion object {
-        private const val ENCODE_SIGNATURE = "encode"
-        private const val DECODE_SIGNATURE = "decode"
-        private const val DECODE_ONE_SIGNATURE = "decode_1"
-        private const val ENCODED_FEATURES = 1_024
-        private const val ENCODED_TIME_STEPS = 63
-        private const val DURATION_COUNT = 5
-        private const val TOKEN_PROGRESS_LIMIT = 512
+        private const val TAG = "LiteRtParakeetEngine"
+        private const val ENCODE = "encode"
+        private const val PREDICT = "predict"
+        private const val JOINT = "joint"
+        private const val ENCODED_FEATURES = 640
+        private const val STATE_SIZE = 2 * 640
+        private const val SUBSAMPLING = 8
+        private const val MAX_SYMBOLS_PER_STEP = 10
+        private const val CANCEL_CHECK_STEPS = 32
+        private const val PROGRESS_DECODED = 80
+        private const val PROGRESS_LIMIT = 100
+        private const val CPU_THREADS = 4
+        private const val GPU_CACHE_DIRECTORY = "parakeet-litert-gpu-cache"
+        private val DURATIONS = intArrayOf(0, 1, 2, 3, 4)
 
-        fun open(
-            context: Context,
-            backend: WhisperBackendRequest,
-        ): LiteRtParakeetEngine {
+        fun open(context: Context, backend: WhisperBackendRequest): LiteRtParakeetEngine {
             val applicationContext = context.applicationContext
-            val options = when (backend) {
-                WhisperBackendRequest.CPU -> CompiledModel.Options(Accelerator.CPU)
-                WhisperBackendRequest.GPU ->
-                    CompiledModel.Options(Accelerator.GPU, Accelerator.CPU).apply {
-                        gpuOptions = CompiledModel.GpuOptions(
-                            precision = CompiledModel.GpuOptions.Precision.FP32,
-                            constantTensorSharing = true,
-                        )
-                    }
+            val files = ParakeetModelFiles.verified(applicationContext)
+            val tokenizer = applicationContext.assets.open(ParakeetAssets.TOKENIZER).use(ParakeetTokenizer::load)
+            val cpu = CompiledModel.Options(Accelerator.CPU).apply {
+                cpuOptions = CompiledModel.CpuOptions(CPU_THREADS, null, null)
             }
-            val model = CompiledModel.create(
-                applicationContext.assets,
-                ParakeetAssets.MODEL,
-                options,
-            )
-            return try {
-                LiteRtParakeetEngine(
-                    model = model,
-                    tokenizer = applicationContext.assets.open(ParakeetAssets.TOKENIZER).use(
-                        ParakeetTokenizer::load,
-                    ),
-                    featureExtractor = ParakeetFeatureExtractor(),
-                    encodeInputs = model.createInputBuffers(ENCODE_SIGNATURE),
-                    encodeOutputs = model.createOutputBuffers(ENCODE_SIGNATURE),
-                    decodeInputs = model.createInputBuffers(DECODE_SIGNATURE),
-                    decodeOutputs = model.createOutputBuffers(DECODE_SIGNATURE),
-                    decodeOneInputs = model.createInputBuffers(DECODE_ONE_SIGNATURE),
-                    decodeOneOutputs = model.createOutputBuffers(DECODE_ONE_SIGNATURE),
-                )
+            val decoderModel = CompiledModel.create(files.decoder.absolutePath, cpu)
+            try {
+                var usesGpu = false
+                val encoderModel = if (backend == WhisperBackendRequest.GPU) {
+                    runCatching {
+                        CompiledModel.create(files.encoder.absolutePath, gpuOptions(applicationContext, files.encoder))
+                    }.onFailure {
+                        Log.w(TAG, "Parakeet GPU encoder could not start; using the CPU.", it)
+                    }.getOrNull()?.also { usesGpu = true }
+                } else {
+                    null
+                } ?: CompiledModel.create(files.encoder.absolutePath, cpu)
+                return try {
+                    LiteRtParakeetEngine(encoderModel, decoderModel, tokenizer, usesGpu)
+                } catch (failure: Throwable) {
+                    encoderModel.close()
+                    throw failure
+                }
             } catch (failure: Throwable) {
-                model.close()
+                decoderModel.close()
                 throw failure
             }
         }
+
+        /**
+         * FP16 precision executes as F32_F16 with the patched LiteRT runtime. The compiled GPU
+         * programs are cached (~160 MB), which cuts the load from ~26 s to ~15 s.
+         */
+        private fun gpuOptions(context: Context, encoder: File) =
+            CompiledModel.Options(Accelerator.GPU, Accelerator.CPU).apply {
+                val cache = File(context.cacheDir, GPU_CACHE_DIRECTORY).apply { mkdirs() }
+                gpuOptions = CompiledModel.GpuOptions(
+                    precision = CompiledModel.GpuOptions.Precision.FP16,
+                    constantTensorSharing = true,
+                    serializationDir = cache.absolutePath,
+                    modelCacheKey = "${encoder.name}-${encoder.length()}-fp16",
+                    serializeProgramCache = true,
+                )
+            }
     }
+}
+
+/** Opens the Parakeet engine for [WhisperEngineCache] and reports which backend it got. */
+internal fun openParakeetEngineSet(
+    context: Context,
+    requestedBackend: WhisperBackendRequest,
+): WhisperEngineCache.EngineSet {
+    val engine = LiteRtParakeetEngine.open(context, requestedBackend)
+    val selection = when {
+        requestedBackend == WhisperBackendRequest.CPU -> WhisperBackendSelection.cpuRequested()
+        engine.usesGpu -> WhisperBackendSelection.gpuSelected()
+        else -> WhisperBackendSelection.gpuFallback(
+            actual = WhisperRuntimeBackend.CPU_XNNPACK,
+            stage = WhisperBackendFallbackStage.OPEN,
+            reason = "The Parakeet GPU encoder could not start; using CPU/XNNPACK.",
+        )
+    }
+    return WhisperEngineCache.EngineSet(listOf(engine), selection)
 }

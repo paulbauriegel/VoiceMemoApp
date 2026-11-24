@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -21,6 +22,11 @@ import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Security
@@ -67,6 +73,12 @@ fun VoiceMemoLicensesScreen(
     transcribeWhileRecordingEnabled: Boolean = false,
     transcriptionTimingEnabled: Boolean = false,
     transcriptionModelId: String = "whisper-large-v3-turbo",
+    parakeetInstalled: Boolean = false,
+    speakerLabelsAvailable: Boolean = false,
+    speakerLabelsEnabled: Boolean = false,
+    joinSpeakerLines: Boolean = false,
+    speakerPeople: List<SpeakerPersonUi> = emptyList(),
+    voiceSampleRecording: VoiceSampleRecordingUi = VoiceSampleRecordingUi(),
     onAction: (VoiceMemoUiAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -211,6 +223,7 @@ fun VoiceMemoLicensesScreen(
             item(key = "transcription-model") {
                 TranscriptionModelSettingsCard(
                     selectedModelId = transcriptionModelId,
+                    parakeetInstalled = parakeetInstalled,
                     onSelected = { modelId ->
                         onAction(VoiceMemoUiAction.TranscriptionModelChanged(modelId))
                     },
@@ -294,6 +307,56 @@ fun VoiceMemoLicensesScreen(
                         )
                     },
                 )
+            }
+
+            if (speakerLabelsAvailable) {
+                item(key = "speakers-heading") {
+                    SettingsSectionHeading("Speakers")
+                }
+
+                item(key = "speaker-labels") {
+                    TranscriptionToggleSettingsCard(
+                        headline = "Show who is speaking",
+                        supportingText =
+                            "Mark transcript lines as you or someone else, on this device. " +
+                                "Needs Whisper timestamps. Adds about 6 minutes of background " +
+                                "work per hour of audio; the transcript itself is unchanged.",
+                        enabled = speakerLabelsEnabled,
+                        testTag = "settings_speaker_labels",
+                        onEnabledChange = { enabled ->
+                            onAction(VoiceMemoUiAction.SpeakerLabelsChanged(enabled))
+                        },
+                    )
+                }
+
+                if (speakerLabelsEnabled) {
+                    item(key = "speaker-join-lines") {
+                        TranscriptionToggleSettingsCard(
+                            headline = "Join short lines",
+                            supportingText =
+                                "Show consecutive lines of the same speaker as one line of up to " +
+                                    "20 seconds. This only changes the view; editing still works " +
+                                    "line by line.",
+                            enabled = joinSpeakerLines,
+                            testTag = "settings_join_speaker_lines",
+                            onEnabledChange = { enabled ->
+                                onAction(VoiceMemoUiAction.JoinSpeakerLinesChanged(enabled))
+                            },
+                        )
+                    }
+
+                    // Until a first sample exists there is no stored person; show "Me" anyway.
+                    val people = speakerPeople.ifEmpty {
+                        listOf(SpeakerPersonUi(id = "", name = "Me", isSelf = true, samples = emptyList()))
+                    }
+                    items(items = people, key = { "speaker-person-${it.id}" }) { person ->
+                        SpeakerPersonCard(
+                            person = person,
+                            recording = voiceSampleRecording,
+                            onAction = onAction,
+                        )
+                    }
+                }
             }
 
             item(key = "privacy-heading") {
@@ -409,6 +472,98 @@ private fun AppearanceSettingsCard(
     }
 }
 
+/** One known person with their voice samples; the user can record a new sample or remove one. */
+@Composable
+private fun SpeakerPersonCard(
+    person: SpeakerPersonUi,
+    recording: VoiceSampleRecordingUi,
+    onAction: (VoiceMemoUiAction) -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("settings_speaker_person"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        ListItem(
+            leadingContent = { Icon(Icons.Rounded.Person, contentDescription = null) },
+            headlineContent = { Text(person.name) },
+            supportingContent = {
+                Text(
+                    when (person.samples.size) {
+                        0 -> "No voice sample yet. Record one, or choose “This is me” on a transcript line."
+                        1 -> "1 voice sample"
+                        else -> "${person.samples.size} voice samples"
+                    },
+                )
+            },
+            colors = ListItemDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            ),
+        )
+        person.samples.forEach { sample ->
+            ListItem(
+                headlineContent = { Text(sample.title) },
+                supportingContent = { Text(sample.detail) },
+                trailingContent = {
+                    IconButton(
+                        onClick = { onAction(VoiceMemoUiAction.DeleteVoiceSample(sample.id)) },
+                        modifier = Modifier.testTag("settings_delete_voice_sample"),
+                    ) {
+                        Icon(Icons.Rounded.Delete, contentDescription = "Delete this voice sample")
+                    }
+                },
+                colors = ListItemDefaults.colors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            )
+        }
+        Column(
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            when {
+                recording.isRecording -> {
+                    Text(
+                        text = "Recording… ${recording.elapsedSeconds} s. Talk in your normal voice " +
+                            "for about 20 seconds.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    FilledTonalButton(
+                        onClick = { onAction(VoiceMemoUiAction.StopVoiceSample) },
+                        modifier = Modifier.testTag("settings_stop_voice_sample"),
+                    ) {
+                        Icon(Icons.Rounded.Stop, contentDescription = null)
+                        Text("Stop and save", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+
+                recording.isProcessing -> {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    Text("Saving the voice sample…", style = MaterialTheme.typography.bodyMedium)
+                }
+
+                else -> FilledTonalButton(
+                    onClick = { onAction(VoiceMemoUiAction.StartVoiceSample) },
+                    modifier = Modifier.testTag("settings_record_voice_sample"),
+                ) {
+                    Icon(Icons.Rounded.Mic, contentDescription = null)
+                    Text("Record voice sample", modifier = Modifier.padding(start = 8.dp))
+                }
+            }
+            Text(
+                text = "Voice samples are stored as a voiceprint on this device only. " +
+                    "Deleting a sample removes it and updates the labels.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @Composable
 private fun TranscriptionToggleSettingsCard(
     headline: String,
@@ -449,6 +604,7 @@ private fun TranscriptionToggleSettingsCard(
 @Composable
 private fun TranscriptionModelSettingsCard(
     selectedModelId: String,
+    parakeetInstalled: Boolean,
     onSelected: (String) -> Unit,
 ) {
     val models = listOf(
@@ -460,7 +616,12 @@ private fun TranscriptionModelSettingsCard(
         Triple(
             "parakeet-tdt-0.6b-v3",
             "Parakeet TDT 0.6B v3",
-            "Faster 5-second multilingual model with automatic language detection.",
+            if (parakeetInstalled) {
+                "About three times faster on the GPU, with word timestamps and live " +
+                    "transcription. Detects the language automatically."
+            } else {
+                "The model files are not installed on this device yet."
+            },
         ),
     )
     Card(
@@ -474,6 +635,7 @@ private fun TranscriptionModelSettingsCard(
     ) {
         Column {
             models.forEachIndexed { index, (id, name, description) ->
+                val enabled = id != "parakeet-tdt-0.6b-v3" || parakeetInstalled
                 ListItem(
                     headlineContent = { Text(name) },
                     supportingContent = { Text(description) },
@@ -481,12 +643,13 @@ private fun TranscriptionModelSettingsCard(
                         RadioButton(
                             selected = selectedModelId == id,
                             onClick = null,
+                            enabled = enabled,
                         )
                     },
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 72.dp)
-                        .clickable { onSelected(id) }
+                        .clickable(enabled = enabled) { onSelected(id) }
                         .testTag("settings_transcription_model_$id"),
                     colors = ListItemDefaults.colors(
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,

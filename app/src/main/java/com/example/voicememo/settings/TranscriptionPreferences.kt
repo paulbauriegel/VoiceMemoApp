@@ -24,6 +24,20 @@ class TranscriptionPreferences(
             preferences.edit().putBoolean(KEY_VAD_ENABLED, value).apply()
         }
 
+    /** "Me / others" speaker labels; off until the user turns them on. */
+    var speakerLabelsEnabled: Boolean
+        get() = preferences.getBoolean(KEY_SPEAKER_LABELS_ENABLED, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_SPEAKER_LABELS_ENABLED, value).apply()
+        }
+
+    /** Shows consecutive lines of one speaker as one longer line; stored lines stay as they are. */
+    var joinSpeakerLinesEnabled: Boolean
+        get() = preferences.getBoolean(KEY_JOIN_SPEAKER_LINES_ENABLED, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_JOIN_SPEAKER_LINES_ENABLED, value).apply()
+        }
+
     var gpuAccelerationEnabled: Boolean
         get() = preferences.getBoolean(
             KEY_GPU_ACCELERATION_ENABLED,
@@ -62,6 +76,8 @@ class TranscriptionPreferences(
         const val KEY_TIMESTAMPS_ENABLED = "whisper_timestamps_enabled"
         const val KEY_VAD_ENABLED = "voice_activity_detection_enabled"
         const val KEY_GPU_ACCELERATION_ENABLED = "gpu_acceleration_enabled"
+        const val KEY_SPEAKER_LABELS_ENABLED = "speaker_labels_enabled"
+        const val KEY_JOIN_SPEAKER_LINES_ENABLED = "join_speaker_lines_enabled"
         const val KEY_TRANSCRIBE_WHILE_RECORDING_ENABLED =
             "transcribe_while_recording_enabled"
         const val KEY_TRANSCRIPTION_TIMING_ENABLED = "transcription_timing_enabled"

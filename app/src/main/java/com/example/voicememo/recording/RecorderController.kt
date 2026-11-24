@@ -64,6 +64,8 @@ data class RecordingTranscriptionConfig(
     val timestampsEnabled: Boolean,
     val voiceActivityDetectionEnabled: Boolean,
     val gpuAccelerationEnabled: Boolean,
+    /** Model that transcribes during and after this recording. */
+    val transcriptionModelId: String = "whisper-large-v3-turbo",
 )
 
 internal object RecordingRuntime {

@@ -27,6 +27,12 @@ import java.io.File
 import java.io.Closeable
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import com.example.voicememo.speaker.PyannoteSegmenter
+import com.example.voicememo.speaker.SpeakerLabelIndex
+import com.example.voicememo.speaker.SpeakerProfiles
+import com.example.voicememo.speaker.VoiceSampleRecorder
+import com.example.voicememo.transcription.SileroVoiceActivityDetector
+import com.example.voicememo.speaker.CamPlusPlusEmbedder
 import kotlinx.coroutines.withContext
 
 class AppContainer(
@@ -49,6 +55,13 @@ class AppContainer(
         RoomVoiceMemoBackupManager(
             database = database,
             memoRoot = File(applicationContext.filesDir, "memos"),
+            speakerSampleDirectory = File(applicationContext.filesDir, "speaker-samples")
+                .takeIf { BuildConfig.SPEAKER_LABELS_ENABLED },
+            onSpeakersRestored = {
+                // A backup may hold voice samples of an earlier voice model.
+                runCatching { speakerProfiles.upgradeRecordedSamples() }
+                speakerLabelIndex.relabelAll()
+            },
         )
     }
     val transcriptionCoordinator: TranscriptionCoordinator by lazy {
@@ -73,6 +86,23 @@ class AppContainer(
             openEmbedder = { MultilingualE5Embedder.open(applicationContext) },
         )
     }
+    internal val speakerLabelIndex: SpeakerLabelIndex by lazy {
+        SpeakerLabelIndex(
+            dao = database.voiceMemoDao(),
+            openSegmenter = { PyannoteSegmenter.open(applicationContext) },
+            openEmbedder = { CamPlusPlusEmbedder.open(applicationContext) },
+        )
+    }
+    internal val speakerProfiles: SpeakerProfiles by lazy {
+        SpeakerProfiles(
+            dao = database.voiceMemoDao(),
+            index = speakerLabelIndex,
+            sampleDirectory = File(applicationContext.filesDir, "speaker-samples"),
+            openEmbedder = { CamPlusPlusEmbedder.open(applicationContext) },
+            openVoiceActivityDetector = { SileroVoiceActivityDetector.open(applicationContext) },
+        )
+    }
+    internal val voiceSampleRecorder: VoiceSampleRecorder by lazy { VoiceSampleRecorder(applicationContext) }
     val audioImporter: AudioImporter by lazy {
         AndroidAudioImporter(
             context = applicationContext,

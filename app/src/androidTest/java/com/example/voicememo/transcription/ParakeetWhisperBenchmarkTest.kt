@@ -135,12 +135,7 @@ class ParakeetWhisperBenchmarkTest {
                     engines = engines,
                     lockAutoDetectedLanguage =
                         model == TranscriptionModel.WHISPER_LARGE_V3_TURBO,
-                    trimOverlappingTokensAtMillis =
-                        if (model == TranscriptionModel.PARAKEET_TDT_0_6B_V3) {
-                            2_500L
-                        } else {
-                            null
-                        },
+                    mergeTimedWords = model == TranscriptionModel.PARAKEET_TDT_0_6B_V3,
                 ).transcribeBatches(
                     windows = (0 until source.chunkCount).map(source::window),
                     loadAudio = { window -> source.readChunk(window.index).samples },

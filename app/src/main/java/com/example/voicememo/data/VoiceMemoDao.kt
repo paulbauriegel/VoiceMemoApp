@@ -272,4 +272,70 @@ interface VoiceMemoDao {
 
     @Query("DELETE FROM transcript_chunks WHERE jobId = :jobId")
     suspend fun deleteTranscriptChunks(jobId: String)
+
+    @Query("SELECT * FROM speaker_persons ORDER BY isSelf DESC, createdAtMillis")
+    suspend fun getSpeakerPersons(): List<SpeakerPerson>
+
+    @Upsert
+    suspend fun upsertSpeakerPerson(person: SpeakerPerson)
+
+    /** Voice samples go with the person (foreign key cascade). */
+    @Query("DELETE FROM speaker_persons WHERE id = :personId")
+    suspend fun deleteSpeakerPerson(personId: String)
+
+    @Query("SELECT * FROM speaker_voice_samples ORDER BY createdAtMillis")
+    suspend fun getSpeakerVoiceSamples(): List<SpeakerVoiceSample>
+
+    @Upsert
+    suspend fun upsertSpeakerVoiceSample(sample: SpeakerVoiceSample)
+
+    @Query("DELETE FROM speaker_voice_samples WHERE id = :sampleId")
+    suspend fun deleteSpeakerVoiceSample(sampleId: String)
+
+    @Query(
+        "SELECT * FROM speaker_local_voiceprints WHERE jobId = :jobId ORDER BY chunkIndex, localSpeaker",
+    )
+    suspend fun getSpeakerLocalVoiceprints(jobId: String): List<SpeakerLocalVoiceprint>
+
+    @Upsert
+    suspend fun upsertSpeakerLocalVoiceprints(voiceprints: List<SpeakerLocalVoiceprint>)
+
+    @Query("DELETE FROM speaker_local_voiceprints WHERE jobId = :jobId")
+    suspend fun deleteSpeakerLocalVoiceprints(jobId: String)
+
+    @Query("SELECT * FROM speaker_analyses WHERE jobId = :jobId")
+    suspend fun getSpeakerAnalysis(jobId: String): SpeakerAnalysis?
+
+    @Query("SELECT jobId FROM speaker_analyses")
+    suspend fun getSpeakerAnalysisJobIds(): List<String>
+
+    @Upsert
+    suspend fun upsertSpeakerAnalysis(analysis: SpeakerAnalysis)
+
+    @Query("DELETE FROM speaker_analyses WHERE jobId = :jobId")
+    suspend fun deleteSpeakerAnalysis(jobId: String)
+
+    @Query("SELECT * FROM speaker_persons ORDER BY isSelf DESC, createdAtMillis")
+    fun observeSpeakerPersons(): Flow<List<SpeakerPerson>>
+
+    @Query("SELECT * FROM speaker_voice_samples ORDER BY createdAtMillis")
+    fun observeSpeakerVoiceSamples(): Flow<List<SpeakerVoiceSample>>
+
+    @Query("SELECT * FROM speaker_voice_samples WHERE id = :sampleId")
+    suspend fun getSpeakerVoiceSample(sampleId: String): SpeakerVoiceSample?
+
+    @Query("SELECT * FROM speaker_analyses WHERE jobId = :jobId")
+    fun observeSpeakerAnalysis(jobId: String): Flow<SpeakerAnalysis?>
+
+    @Query("SELECT * FROM speaker_segment_overrides WHERE jobId = :jobId")
+    fun observeSpeakerSegmentOverrides(jobId: String): Flow<List<SpeakerSegmentOverride>>
+
+    @Upsert
+    suspend fun upsertSpeakerSegmentOverride(override: SpeakerSegmentOverride)
+
+    @Query("DELETE FROM speaker_segment_overrides WHERE jobId = :jobId AND segmentId = :segmentId")
+    suspend fun deleteSpeakerSegmentOverride(jobId: String, segmentId: String)
+
+    @Query("SELECT * FROM speaker_segment_overrides WHERE jobId = :jobId")
+    suspend fun getSpeakerSegmentOverrides(jobId: String): List<SpeakerSegmentOverride>
 }

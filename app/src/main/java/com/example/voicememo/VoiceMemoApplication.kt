@@ -71,9 +71,7 @@ class VoiceMemoApplication : Application(), RecordingCompletionSink {
                     voiceActivityDetectionEnabled =
                         config.voiceActivityDetectionEnabled,
                     gpuAccelerationEnabled = config.gpuAccelerationEnabled,
-                    transcriptionModelId =
-                        com.example.voicememo.transcription.TranscriptionModel
-                            .WHISPER_LARGE_V3_TURBO.id,
+                    transcriptionModelId = config.transcriptionModelId,
                     reuseRecordingStageResults = true,
                 )
             }.onFailure { failure ->

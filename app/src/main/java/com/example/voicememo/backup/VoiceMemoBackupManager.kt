@@ -60,6 +60,7 @@ data class BackupExportResult(
 data class BackupImportResult(
     val importedMemoIds: List<String>,
     val remappedMemoCount: Int,
+    val restoredVoiceSamples: Int = 0,
 )
 
 class VoiceMemoBackupException(
@@ -86,9 +87,13 @@ interface VoiceMemoBackupManager {
 class RoomVoiceMemoBackupManager(
     database: VoiceMemoDatabase,
     memoRoot: File,
+    /** Where recorded voice samples live; null leaves the voice profile out of backups. */
+    speakerSampleDirectory: File? = null,
+    onSpeakersRestored: suspend () -> Unit = {},
 ) : VoiceMemoBackupManager by DefaultVoiceMemoBackupManager(
     store = RoomVoiceMemoBackupStore(database),
     memoRoot = memoRoot,
+    speakers = speakerSampleDirectory?.let { RoomSpeakerBackupStore(database, it, onSpeakersRestored) },
 )
 
 internal data class BackupMemoSnapshot(
@@ -162,6 +167,7 @@ private class RoomVoiceMemoBackupStore(
 internal class DefaultVoiceMemoBackupManager(
     private val store: VoiceMemoBackupStore,
     private val memoRoot: File,
+    private val speakers: SpeakerBackupStore? = null,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
     private val usableSpace: () -> Long = { memoRoot.usableSpace },
@@ -190,12 +196,22 @@ internal class DefaultVoiceMemoBackupManager(
                         (memo.versions?.size?.toLong() ?: 0L)
                 } <= MAX_TOTAL_TRANSCRIPT_BYTES) { "The backup contains too much transcript text." }
                 onProgress(BackupProgress(BackupPhase.WRITING_ARCHIVE, 0, prepared.size))
+                // The voice profile is optional; a backup without one stays version 1.
+                val speakerBackup = speakers?.snapshot()?.takeIf { it.samples.isNotEmpty() }
+                val speakerAudio = speakerBackup?.samples.orEmpty()
+                    .mapNotNull { it.audioFileName }
+                    .mapNotNull { name -> speakers?.sampleAudio(name)?.let { name to it } }
+                    .filter { (name, file) ->
+                        SpeakerBackupCodec.SAMPLE_ENTRY.matches("${SpeakerBackupCodec.SAMPLE_DIRECTORY}/$name") &&
+                            file.length() <= SpeakerBackupCodec.MAX_SAMPLE_AUDIO_BYTES
+                    }
+                    .toMap()
 
                 val zip = ZipOutputStream(BufferedOutputStream(output))
                 writeZipBytes(
                     zip = zip,
                     name = MANIFEST_ENTRY,
-                    bytes = manifestProperties(prepared).toBytes(),
+                    bytes = manifestProperties(prepared, hasSpeakers = speakerBackup != null).toBytes(),
                 )
                 prepared.forEachIndexed { index, memo ->
                     currentCoroutineContext().ensureActive()
@@ -227,6 +243,16 @@ internal class DefaultVoiceMemoBackupManager(
                             currentTitle = memo.snapshot.memo.title,
                         ),
                     )
+                }
+                if (speakerBackup != null) {
+                    writeZipBytes(
+                        zip,
+                        SpeakerBackupCodec.ENTRY,
+                        SpeakerBackupCodec.encode(speakerBackup, speakerAudio).toBytes(),
+                    )
+                    speakerAudio.forEach { (name, file) ->
+                        writeZipFile(zip, "${SpeakerBackupCodec.SAMPLE_DIRECTORY}/$name", file)
+                    }
                 }
                 zip.finish()
                 zip.flush()
@@ -269,6 +295,9 @@ internal class DefaultVoiceMemoBackupManager(
                 extractArchive(input, staging)
                 onProgress(BackupProgress(BackupPhase.VALIDATING, 0, null))
                 val parsed = parseStagedArchive(staging)
+                val parsedSpeakers = parseStagedSpeakers(staging)
+                val restoredIds = HashMap<String, String>()
+                var restoredVoiceSamples = 0
                 val existingIds = store.everyMemoId().toMutableSet()
                 val restored = mutableListOf<RestoredMemo>()
                 var remapped = 0
@@ -282,6 +311,7 @@ internal class DefaultVoiceMemoBackupManager(
                     ).also {
                         if (it != source.originalId) remapped += 1
                         existingIds += it
+                        restoredIds[source.originalId] = it
                     }
                     val ready = File(root, ".restore-ready-$destinationId-${UUID.randomUUID()}")
                     check(ready.mkdirs()) { "A restored memo could not be staged." }
@@ -355,6 +385,13 @@ internal class DefaultVoiceMemoBackupManager(
                     published.forEach { directory ->
                         runCatching { File(directory, PENDING_RESTORE_MARKER).delete() }
                     }
+                    // The recordings are restored at this point; a problem with the
+                    // voice profile must not undo them.
+                    if (parsedSpeakers != null && speakers != null) {
+                        restoredVoiceSamples = runCatching {
+                            speakers.restore(parsedSpeakers.first, parsedSpeakers.second, restoredIds)
+                        }.getOrDefault(0)
+                    }
                 }
                 runCatching { staging.deleteRecursively() }
                 onProgress(
@@ -367,6 +404,7 @@ internal class DefaultVoiceMemoBackupManager(
                 BackupImportResult(
                     importedMemoIds = restored.map { it.memo.id },
                     remappedMemoCount = remapped,
+                    restoredVoiceSamples = restoredVoiceSamples,
                 )
             } catch (cancelled: CancellationException) {
                 if (!committed) {
@@ -568,7 +606,7 @@ internal class DefaultVoiceMemoBackupManager(
         require(manifest.required("format") == FORMAT_ID) {
             "This is not a Voice Memo backup."
         }
-        require(manifest.requiredInt("version") == FORMAT_VERSION) {
+        require(manifest.requiredInt("version") in FORMAT_VERSION..FORMAT_VERSION_WITH_SPEAKERS) {
             "This backup version is not supported."
         }
         val memoCount = manifest.requiredInt("memoCount")
@@ -578,6 +616,10 @@ internal class DefaultVoiceMemoBackupManager(
         }
         require(ids.toSet().size == ids.size) { "The backup lists a memo more than once." }
 
+        require(
+            manifest.requiredInt("version") == FORMAT_VERSION_WITH_SPEAKERS ||
+                !File(staging, SpeakerBackupCodec.ENTRY).exists(),
+        ) { "The backup contains a voice profile its version does not allow." }
         val actualFolders = File(staging, MEMOS_DIRECTORY)
             .listFiles()
             .orEmpty()
@@ -587,6 +629,29 @@ internal class DefaultVoiceMemoBackupManager(
             "The backup memo list does not match its files."
         }
         return ids.map { id -> parseMemo(File(staging, "$MEMOS_DIRECTORY/$id"), id) }
+    }
+
+    /** The validated voice profile and its verified audio files by name, or null without one. */
+    private fun parseStagedSpeakers(staging: File): Pair<SpeakerBackup, Map<String, File>>? {
+        val file = File(staging, SpeakerBackupCodec.ENTRY)
+        val audioDirectory = File(staging, SpeakerBackupCodec.SAMPLE_DIRECTORY)
+        if (!file.exists()) {
+            require(audioDirectory.listFiles().isNullOrEmpty()) { "The backup has voice samples without a voice profile." }
+            return null
+        }
+        val decoded = SpeakerBackupCodec.decode(loadProperties(file, SpeakerBackupCodec.MAX_PROPERTIES_BYTES))
+        val staged = audioDirectory.listFiles().orEmpty().associateBy(File::getName)
+        require(staged.keys == decoded.audio.keys) { "The backed-up voice samples do not match the voice profile." }
+        decoded.audio.forEach { (name, expected) ->
+            verifyFile(
+                file = staged.getValue(name),
+                expectedBytes = expected.first,
+                expectedSha256 = expected.second,
+                maximumBytes = SpeakerBackupCodec.MAX_SAMPLE_AUDIO_BYTES,
+                label = "voice sample",
+            )
+        }
+        return decoded.backup to staged
     }
 
     private fun parseMemo(directory: File, originalId: String): ParsedMemo {
@@ -833,10 +898,13 @@ internal class DefaultVoiceMemoBackupManager(
         error("A unique memo identifier could not be created.")
     }
 
-    private fun manifestProperties(memos: List<PreparedExportMemo>): Properties =
+    private fun manifestProperties(memos: List<PreparedExportMemo>, hasSpeakers: Boolean = false): Properties =
         Properties().apply {
             setProperty("format", FORMAT_ID)
-            setProperty("version", FORMAT_VERSION.toString())
+            setProperty(
+                "version",
+                (if (hasSpeakers) FORMAT_VERSION_WITH_SPEAKERS else FORMAT_VERSION).toString(),
+            )
             setProperty("createdAtMillis", clockMillis().toString())
             setProperty("memoCount", memos.size.toString())
             memos.forEachIndexed { index, memo ->
@@ -1224,7 +1292,10 @@ private fun isAllowedEntryName(name: String): Boolean {
     ) {
         return false
     }
-    if (name == MANIFEST_ENTRY) return true
+    if (name == MANIFEST_ENTRY || name == SpeakerBackupCodec.ENTRY) return true
+    SpeakerBackupCodec.SAMPLE_ENTRY.matchEntire(name)?.let { sample ->
+        return runCatching { requireValidUuid(sample.groupValues[1]) }.isSuccess
+    }
     val match = MEMO_ENTRY_PATTERN.matchEntire(name) ?: return false
     val id = match.groupValues[1]
     return runCatching { requireValidUuid(id) }.isSuccess
@@ -1241,6 +1312,8 @@ private fun safeStagingFile(staging: File, name: String): File {
 
 private fun maximumEntryBytes(name: String): Long = when {
     name == MANIFEST_ENTRY -> MAX_MANIFEST_BYTES
+    name == SpeakerBackupCodec.ENTRY -> SpeakerBackupCodec.MAX_PROPERTIES_BYTES
+    SpeakerBackupCodec.SAMPLE_ENTRY.matches(name) -> SpeakerBackupCodec.MAX_SAMPLE_AUDIO_BYTES
     name.endsWith("/$METADATA_FILE") -> MAX_METADATA_BYTES
     name.endsWith("/$AUDIO_FILE") -> MAX_AUDIO_BYTES
     name.endsWith("/$WAVEFORM_FILE") -> MAX_WAVEFORM_BYTES
@@ -1259,6 +1332,8 @@ private fun isTranscriptEntry(name: String): Boolean =
 
 private const val FORMAT_ID = "com.example.voicememo.backup"
 private const val FORMAT_VERSION = 1
+/** Version 2 adds the optional voice profile under `speakers/`; version 1 archives stay readable. */
+private const val FORMAT_VERSION_WITH_SPEAKERS = 2
 private const val MANIFEST_ENTRY = "voice-memo-backup.properties"
 private const val MEMOS_DIRECTORY = "memos"
 private const val VERSIONS_FILE = "transcript-versions.properties"

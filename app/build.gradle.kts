@@ -153,6 +153,15 @@ val includeSemanticSearch = providers
         value.toBooleanStrictOrNull()
             ?: error("includeSemanticSearch must be true or false.")
     }
+// "Me / others" speaker labels (bundled pyannote segmentation-3.0 and a
+// 3D-Speaker CAM++ voice model). Disabling it drops both assets and the labelling work.
+val includeSpeakerLabels = providers
+    .gradleProperty("includeSpeakerLabels")
+    .orElse("true")
+    .map { value ->
+        value.toBooleanStrictOrNull()
+            ?: error("includeSpeakerLabels must be true or false.")
+    }
 val installReleaseLocally = providers
     .gradleProperty("installReleaseLocally")
     .orElse("false")
@@ -317,6 +326,8 @@ val sileroVadAssetRoot =
     layout.projectDirectory.dir("src/main/generatedVadAssets")
 val embeddingAssetRoot =
     layout.projectDirectory.dir("src/main/generatedEmbeddingAssets")
+val speakerAssetRoot =
+    layout.projectDirectory.dir("src/main/generatedSpeakerAssets")
 val strictMathGpuProbeAar = rootProject.layout.projectDirectory.file(
     "build/generated/litert-strict-math-probe/litert-2.1.6-strict-math-probe.aar",
 )
@@ -409,6 +420,11 @@ android {
             "boolean",
             "SEMANTIC_SEARCH_ENABLED",
             includeSemanticSearch.get().toString(),
+        )
+        buildConfigField(
+            "boolean",
+            "SPEAKER_LABELS_ENABLED",
+            includeSpeakerLabels.get().toString(),
         )
         buildConfigField(
             "int",
@@ -520,8 +536,14 @@ android {
                         "-DWHISPER_CPP_SOURCE_DIR=${whisperCppSourceRoot.asFile.absolutePath}",
                         "-DWHISPER_CPP_REVISION=$whisperCppRevision",
                         "-DVULKAN_HEADERS_DIR=${whisperCppVulkanHeadersRoot.asFile.absolutePath}",
+                        // ggml selects its NEON dot-product / fp16 kernels from these
+                        // features; without them it falls back to generic code.
+                        // Tensor G2 (Cortex-X1/A78/A55) is ARMv8.2 with dotprod and fp16.
+                        "-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16",
                     )
-                    cppFlags += listOf("-std=c++17", "-O3")
+                    // The debug variant otherwise compiles ggml's C kernels at -O0.
+                    cFlags += listOf("-O3", "-DNDEBUG")
+                    cppFlags += listOf("-std=c++17", "-O3", "-DNDEBUG")
                 }
             }
         }
@@ -566,6 +588,9 @@ android {
         getByName("main").assets.directories.add(sileroVadAssetRoot.asFile.absolutePath)
         if (includeSemanticSearch.get()) {
             getByName("main").assets.directories.add(embeddingAssetRoot.asFile.absolutePath)
+        }
+        if (includeSpeakerLabels.get()) {
+            getByName("main").assets.directories.add(speakerAssetRoot.asFile.absolutePath)
         }
         if (useFullFloatDecoderProduction.get() || useSplitWhisperProduction.get()) {
             if (useFullFloatDecoderProduction.get()) {
@@ -870,18 +895,11 @@ tasks.configureEach {
     }
 }
 
+// Only the tokenizer is bundled. The 1.3 GB Parakeet LiteRT model does not fit next to
+// Whisper in a 4 GiB APK; scripts/install-parakeet-model.py puts it in app-private storage.
 val requiredParakeetAssets = mapOf(
-    "parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite" to (
-        614_261_072L to "334745b8bc7fd372b1c213516f0b6338bb827b1a2abb3e77ad35fe6fea5cd16b"
-        ),
     "tokenizer.json" to (
         1_159_960L to "bd321b096832a3f270bd3b2a88823957920f1a5c5ada71114a26ea729d0cbe91"
-        ),
-    "processor_config.json" to (
-        392L to "8346a93a3b987fa1dec57a78f045cd0817d21786589a5a096b41a57a446fd1d7"
-        ),
-    "config.json" to (
-        1_153L to "e747b85e1bdfd300c8b8ac63bac8dd5221f8fe9bc275b48d06c735fcd6971b6e"
         ),
 )
 
@@ -920,13 +938,15 @@ val verifyParakeetAssets by tasks.registering {
 
 val prepareParakeetProductionAssets by tasks.registering(Sync::class) {
     dependsOn(verifyParakeetAssets)
-    from(parakeetSourceAssetRoot)
+    from(parakeetSourceAssetRoot) {
+        include("tokenizer.json")
+    }
     into(parakeetProductionAssetRoot.map { it.dir("parakeet") })
 }
 
 tasks.named("preBuild").configure {
     dependsOn(verifyParakeetAssets)
-    if (useFullFloatDecoderProduction.get()) {
+    if (useFullFloatDecoderProduction.get() || useSplitWhisperProduction.get()) {
         dependsOn(prepareParakeetProductionAssets)
     }
 }
@@ -1024,6 +1044,58 @@ val verifyMultilingualE5Assets by tasks.registering {
 
 tasks.named("preBuild").configure {
     dependsOn(verifyMultilingualE5Assets)
+}
+
+// Speaker labels: pyannote segmentation-3.0 (MIT, sherpa-onnx ONNX export) and
+// 3D-Speaker CAM++ trained on Chinese and English (Apache 2.0). Name to (bytes, SHA-256).
+val speakerLabelAssets = mapOf(
+    "pyannote_segmentation_3_0.onnx" to
+        (5_992_913L to "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
+    "3dspeaker_campplus_zh_en_advanced.onnx" to
+        (28_281_165L to "53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b"),
+)
+val verifySpeakerLabelAssets by tasks.registering {
+    group = "verification"
+    description = "Checks the pinned offline speaker segmentation and voice models."
+    onlyIf { includeSpeakerLabels.get() }
+    val assetFiles = speakerLabelAssets.keys.map { speakerAssetRoot.file("speaker/$it") }
+    inputs.files(assetFiles)
+
+    doLast {
+        speakerLabelAssets.forEach { (name, expected) ->
+            val (expectedBytes, expectedSha256) = expected
+            val assetFile = speakerAssetRoot.file("speaker/$name").asFile
+            check(assetFile.isFile) {
+                """
+                Offline speaker-label asset is missing:
+                 - ${assetFile.relativeTo(projectDir)}
+
+                Run scripts/fetch-speaker-assets.sh, then build again.
+                """.trimIndent()
+            }
+            check(assetFile.length() == expectedBytes) {
+                "$name has ${assetFile.length()} bytes; expected $expectedBytes. " +
+                    "Re-run scripts/fetch-speaker-assets.sh."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            assetFile.inputStream().buffered().use { stream ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualSha256 == expectedSha256) {
+                "$name SHA-256 is $actualSha256; expected the pinned speaker-label file."
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(verifySpeakerLabelAssets)
 }
 
 val verifyStrictMathGpuProbeAar by tasks.registering {
@@ -2063,6 +2135,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("androidx.room:room-testing:2.8.4")
 

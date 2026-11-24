@@ -18,6 +18,8 @@ import com.example.voicememo.transcription.LiteRtWhisperBackendFactory
 import com.example.voicememo.transcription.LiteRtFullGpuWhisperEngine
 import com.example.voicememo.transcription.LiteRtWhisperEngine
 import com.example.voicememo.transcription.LongFormTranscriber
+import com.example.voicememo.transcription.ParakeetInferenceFingerprint
+import com.example.voicememo.transcription.openParakeetEngineSet
 import com.example.voicememo.transcription.SileroVoiceActivityDetector
 import com.example.voicememo.transcription.StreamingWavChunkSource
 import com.example.voicememo.transcription.TranscriptionModel
@@ -38,8 +40,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 
 /**
- * Serial WorkManager stage that consumes immutable Whisper windows while the
- * recorder continues writing the authoritative memo WAV.
+ * Serial WorkManager stage that consumes immutable model windows (Whisper or
+ * Parakeet) while the recorder continues writing the authoritative memo WAV.
  *
  * It shares the same unique work chain as normal transcription, so two model
  * instances are never opened for separate memos.
@@ -64,6 +66,11 @@ class WhisperPreTranscriptionWorker(
             KEY_GPU_ACCELERATION_ENABLED,
             BuildConfig.WHISPER_BACKEND_REQUESTED.equals("gpu", ignoreCase = true),
         )
+        val model = TranscriptionModel.fromId(
+            inputData.getString(KEY_TRANSCRIPTION_MODEL_ID)
+                ?: TranscriptionModel.WHISPER_LARGE_V3_TURBO.id,
+        )
+        val parakeet = model == TranscriptionModel.PARAKEET_TDT_0_6B_V3
         if (applicationContext.getSystemService(ActivityManager::class.java).isLowRamDevice) {
             return Result.success()
         }
@@ -72,7 +79,9 @@ class WhisperPreTranscriptionWorker(
         setForeground(foregroundInfo("Waiting for a completed audio window"))
         val requestedBackend =
             WhisperBackendRequest.fromGpuAccelerationEnabled(gpuEnabled)
-        val fingerprint = WhisperInferenceFingerprint.forConfiguration(
+        val fingerprint = if (parakeet) {
+            ParakeetInferenceFingerprint.forConfiguration(requestedBackend)
+        } else WhisperInferenceFingerprint.forConfiguration(
             requestedBackend = requestedBackend,
             gpuDecoderMode = if (requestedBackend == WhisperBackendRequest.GPU) {
                 "gpu"
@@ -146,19 +155,23 @@ class WhisperPreTranscriptionWorker(
                     throw WhisperCancelledException()
                 }
                 if (engineLease == null) {
-                    setForeground(foregroundInfo("Loading Whisper for recording"))
+                    setForeground(foregroundInfo("Loading ${model.displayName} for recording"))
                     engineLease = engineCache.acquire(
                         WhisperEngineCache.Key(
-                            model = TranscriptionModel.WHISPER_LARGE_V3_TURBO,
+                            model = model,
                             requestedBackend = requestedBackend,
                             workerCount = 1,
                             threadsPerWorker = BuildConfig.WHISPER_THREADS_PER_WORKER,
                             timestampsEnabled = timestampsEnabled,
                         ),
                     ) {
-                        openEngineSet(requestedBackend, timestampsEnabled)
+                        if (parakeet) {
+                            openParakeetEngineSet(applicationContext, requestedBackend)
+                        } else {
+                            openEngineSet(requestedBackend, timestampsEnabled)
+                        }
                     }
-                    if (vadEnabled) {
+                    if (vadEnabled && !parakeet) {
                         vad = runCatching {
                             SileroVoiceActivityDetector.open(applicationContext)
                         }.getOrNull()
@@ -169,26 +182,29 @@ class WhisperPreTranscriptionWorker(
                 val result = withContext(Dispatchers.Default) {
                     StreamingWavChunkSource.open(
                         file = windowFile,
-                        windowConfig = TranscriptionModel.WHISPER_LARGE_V3_TURBO.windowConfig(),
+                        windowConfig = model.windowConfig(),
                     ).use { source ->
+                        val shouldCancel = { isStopped || finishedMarker.isFile }
                         val audio = source.readChunk(
                             index = 0,
-                            shouldCancel = {
-                                isStopped || finishedMarker.isFile
-                            },
+                            shouldCancel = shouldCancel,
                         ).samples
-                        LongFormTranscriber(
-                            engine = checkNotNull(engineLease).engines.single(),
-                            voiceActivityDetector = vad,
-                        ).transcribe(
-                            samples16Khz = audio,
-                            language = forcedLanguageCode
-                                ?.let(WhisperLanguage::Forced)
-                                ?: WhisperLanguage.Auto,
-                            shouldCancel = {
-                                isStopped || finishedMarker.isFile
-                            },
-                        ).chunks.single().result
+                        val engine = checkNotNull(engineLease).engines.single()
+                        if (parakeet) {
+                            // Same call the post-recording worker makes per window.
+                            engine.transcribeChunk(audio, WhisperLanguage.Auto, shouldCancel)
+                        } else {
+                            LongFormTranscriber(
+                                engine = engine,
+                                voiceActivityDetector = vad,
+                            ).transcribe(
+                                samples16Khz = audio,
+                                language = forcedLanguageCode
+                                    ?.let(WhisperLanguage::Forced)
+                                    ?: WhisperLanguage.Auto,
+                                shouldCancel = shouldCancel,
+                            ).chunks.single().result
+                        }
                     }
                 }
                 if (forcedLanguageCode == null && result.detectedLanguage != "und") {
@@ -199,6 +215,7 @@ class WhisperPreTranscriptionWorker(
                     index = index,
                     fingerprint = fingerprint,
                     result = result,
+                    includeTimedWords = parakeet,
                 )
                 if (!windowFile.delete()) {
                     windowFile.deleteOnExit()
@@ -289,6 +306,7 @@ class WhisperPreTranscriptionWorker(
         const val KEY_TIMESTAMPS_ENABLED = "pretranscription_timestamps"
         const val KEY_VAD_ENABLED = "pretranscription_vad"
         const val KEY_GPU_ACCELERATION_ENABLED = "pretranscription_gpu"
+        const val KEY_TRANSCRIPTION_MODEL_ID = "pretranscription_model"
 
         private const val POLL_MILLIS = 250L
         internal const val ORPHAN_RECOVERY_GRACE_MILLIS = 2_000L

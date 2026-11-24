@@ -1,5 +1,7 @@
 package com.example.voicememo.data
 
+import com.example.voicememo.transcription.ParakeetTranscriptMerger
+import com.example.voicememo.transcription.TimedWordsCodec
 import com.example.voicememo.transcription.WhisperTimestampTokens
 import com.example.voicememo.transcription.WhisperTokenizer
 
@@ -25,11 +27,45 @@ object TranscriptSegments {
     fun generated(
         chunks: List<TranscriptChunk>,
         tokenizer: WhisperTokenizer,
-    ): List<TimedTranscriptSegment> =
-        chunks
+    ): List<TimedTranscriptSegment> {
+        if (chunks.isNotEmpty() && chunks.all { it.timedWordsJson != null }) {
+            return timedWordSegments(chunks)
+        }
+        return chunks
             .filter { it.rawText.isNotBlank() }
             .sortedBy { it.chunkIndex }
             .flatMap { chunk -> chunk.toSegments(tokenizer) }
+    }
+
+    /**
+     * Parakeet windows overlap by five seconds; their words are joined exactly as the
+     * transcript text was ([ParakeetTranscriptMerger]) and grouped into lines. Chunks of a
+     * finished job never change, so the line ids are stable.
+     */
+    private fun timedWordSegments(chunks: List<TranscriptChunk>): List<TimedTranscriptSegment> {
+        val windows = chunks.sortedBy { it.chunkIndex }.map { chunk ->
+            ParakeetTranscriptMerger.Window(
+                startMillis = chunk.windowStartMillis,
+                endMillis = chunk.windowEndMillis,
+                words = TimedWordsCodec.decode(chunk.timedWordsJson).orEmpty().map { word ->
+                    word.copy(
+                        startMillis = chunk.windowStartMillis + word.startMillis,
+                        endMillis = chunk.windowStartMillis + word.endMillis,
+                    )
+                },
+            )
+        }
+        val jobId = chunks.first().jobId
+        return ParakeetTranscriptMerger.lines(ParakeetTranscriptMerger.merge(windows))
+            .mapIndexed { index, line ->
+                TimedTranscriptSegment(
+                    id = "$jobId:w$index",
+                    startMillis = line.startMillis,
+                    endMillis = line.endMillis,
+                    text = line.text,
+                )
+            }
+    }
 
     fun isPlainTextEdit(detail: MemoDetail): Boolean =
         detail.transcript?.editedText != null && detail.segmentEdits.isEmpty()

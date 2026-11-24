@@ -1,5 +1,7 @@
 package com.example.voicememo.recording
 
+import com.example.voicememo.transcription.TranscriptionModel
+import com.example.voicememo.transcription.windowConfig
 import com.example.voicememo.work.WhisperPreTranscriptionStorage
 import java.io.File
 import java.io.RandomAccessFile
@@ -35,6 +37,29 @@ class WhisperWindowSpoolerTest {
             readPcm16(WhisperPreTranscriptionStorage.windowFile(directory, 1)),
         )
         assertTrue(WhisperPreTranscriptionStorage.finishedMarker(directory).isFile)
+    }
+
+    @Test
+    fun parakeetWindowsAreThirtySecondsEveryTwentyFive() {
+        val memoDirectory = temporaryFolder.newFolder("parakeet")
+        val samples = ShortArray(56 * SAMPLE_RATE) { it.toShort() }
+
+        WhisperWindowSpooler(
+            memoDirectory,
+            SAMPLE_RATE,
+            TranscriptionModel.PARAKEET_TDT_0_6B_V3.windowConfig(),
+        ).use { spooler -> spooler.add(samples, samples.size) }
+
+        val directory = WhisperPreTranscriptionStorage.directory(memoDirectory)
+        assertArrayEquals(
+            samples.copyOfRange(0, 30 * SAMPLE_RATE),
+            readPcm16(WhisperPreTranscriptionStorage.windowFile(directory, 0)),
+        )
+        assertArrayEquals(
+            samples.copyOfRange(25 * SAMPLE_RATE, 55 * SAMPLE_RATE),
+            readPcm16(WhisperPreTranscriptionStorage.windowFile(directory, 1)),
+        )
+        assertTrue(!WhisperPreTranscriptionStorage.windowFile(directory, 2).exists())
     }
 
     private fun readPcm16(file: File): ShortArray {

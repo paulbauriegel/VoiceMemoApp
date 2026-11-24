@@ -294,6 +294,11 @@ data class TranscriptChunk(
     val completedAtMillis: Long?,
     /** Model inference time reported for this segment. */
     val inferenceMillis: Long? = null,
+    /**
+     * Word timestamps relative to [windowStartMillis] as [TimedWordsCodec] JSON. Set for
+     * models whose overlapping windows are joined by word time (Parakeet); null for Whisper.
+     */
+    val timedWordsJson: String? = null,
 )
 
 /**

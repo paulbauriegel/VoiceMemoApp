@@ -1,7 +1,6 @@
 package com.example.voicememo.work
 
 import com.example.voicememo.data.TranscriptionJobStatus
-import com.example.voicememo.transcription.TranscriptionModel
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,7 +32,6 @@ class TranscriptionInterruptionPolicyTest {
         assertTrue(
             shouldUsePreTranscribedWindows(
                 reuseRecordingStageResults = true,
-                transcriptionModel = TranscriptionModel.WHISPER_LARGE_V3_TURBO,
             ),
         )
     }
@@ -43,18 +41,8 @@ class TranscriptionInterruptionPolicyTest {
         assertFalse(
             shouldUsePreTranscribedWindows(
                 reuseRecordingStageResults = false,
-                transcriptionModel = TranscriptionModel.WHISPER_LARGE_V3_TURBO,
             ),
         )
     }
 
-    @Test
-    fun otherModelsNeverReuseWhisperRecordingStageResults() {
-        assertFalse(
-            shouldUsePreTranscribedWindows(
-                reuseRecordingStageResults = true,
-                transcriptionModel = TranscriptionModel.PARAKEET_TDT_0_6B_V3,
-            ),
-        )
-    }
 }

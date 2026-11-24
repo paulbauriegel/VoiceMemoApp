@@ -19,6 +19,16 @@ data class ShareableMemo(
     val audioPath: String,
     val effectiveTranscript: String?,
     val transcriptSegments: List<String> = emptyList(),
+    /** Timed lines; when present the transcript is shared as a CSV table instead of plain text. */
+    val transcriptRows: List<ShareTranscriptRow> = emptyList(),
+)
+
+/** One transcript line for the CSV export. [speaker] is "Me", "Other", "Both" or null when unknown. */
+data class ShareTranscriptRow(
+    val startMillis: Long,
+    val endMillis: Long,
+    val speaker: String?,
+    val text: String,
 )
 
 class ShareExporter(
@@ -43,11 +53,13 @@ class ShareExporter(
                     if (audio.isFile) add(FileProvider.getUriForFile(applicationContext, authority, audio))
                 }
                 if (content == ShareContent.Transcript || content == ShareContent.Both) {
-                    val transcript = memo.transcriptForShare()
+                    val table = memo.transcriptCsvForShare()
+                    val transcript = table ?: memo.transcriptForShare()
                     if (!transcript.isNullOrBlank()) {
                         val textFile = File(
                             shareDirectory,
-                            "${safeShareFileName(memo.title)}-${memo.id.take(8)}.txt",
+                            "${safeShareFileName(memo.title)}-${memo.id.take(8)}." +
+                                if (table != null) "csv" else "txt",
                         )
                         textFile.writeText(transcript, Charsets.UTF_8)
                         add(FileProvider.getUriForFile(applicationContext, authority, textFile))
@@ -59,7 +71,11 @@ class ShareExporter(
 
         val mimeType = when (content) {
             ShareContent.Audio -> "audio/wav"
-            ShareContent.Transcript -> "text/plain"
+            ShareContent.Transcript -> when {
+                memos.all { it.transcriptCsvForShare() != null } -> "text/csv"
+                memos.none { it.transcriptCsvForShare() != null } -> "text/plain"
+                else -> "text/*"
+            }
             ShareContent.Both -> "*/*"
         }
         val send = if (attachments.size == 1) {
@@ -106,6 +122,38 @@ internal fun ShareableMemo.transcriptForShare(): String? {
         effectiveTranscript
     }
 }
+
+/**
+ * The timed transcript as a CSV table (`start,end,speaker,text`), or null when
+ * the memo has no timed lines. UTF-8 with a byte-order mark so spreadsheet apps
+ * read umlauts correctly; fields are quoted as in RFC 4180.
+ */
+internal fun ShareableMemo.transcriptCsvForShare(): String? {
+    val rows = transcriptRows.filter { it.text.isNotBlank() }
+    if (rows.isEmpty()) return null
+    return buildString {
+        append('\uFEFF')
+        append("start,end,speaker,text\r\n")
+        for (row in rows) {
+            append(csvTime(row.startMillis)).append(',')
+            append(csvTime(row.endMillis)).append(',')
+            append(csvField(row.speaker.orEmpty())).append(',')
+            append(csvField(row.text.trim())).append("\r\n")
+        }
+    }
+}
+
+private fun csvTime(millis: Long): String {
+    val seconds = millis.coerceAtLeast(0L) / 1_000L
+    return "%02d:%02d:%02d".format(seconds / 3_600L, seconds / 60L % 60L, seconds % 60L)
+}
+
+private fun csvField(value: String): String =
+    if (value.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+        "\"" + value.replace("\"", "\"\"") + "\""
+    } else {
+        value
+    }
 
 internal fun safeShareFileName(title: String): String {
     val cleaned = title

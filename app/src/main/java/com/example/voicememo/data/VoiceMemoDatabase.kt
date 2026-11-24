@@ -19,8 +19,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MemoSearchFts::class,
         TranscriptSegmentEdit::class,
         TranscriptSegmentEmbedding::class,
+        SpeakerPerson::class,
+        SpeakerVoiceSample::class,
+        SpeakerLocalVoiceprint::class,
+        SpeakerAnalysis::class,
+        SpeakerSegmentOverride::class,
     ],
-    version = 12,
+    version = 14,
     exportSchema = true,
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -49,8 +54,71 @@ abstract class VoiceMemoDatabase : RoomDatabase() {
                     MIGRATION_9_10,
                     MIGRATION_10_11,
                     MIGRATION_11_12,
+                    MIGRATION_12_13,
+                    MIGRATION_13_14,
                 )
                 .build()
+
+        /**
+         * Speaker labels: persons and their voice samples, per-run voiceprints,
+         * the resulting timeline and the user's own segment labels. Only adds
+         * empty tables; existing data is untouched.
+         */
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS speaker_persons (id TEXT NOT NULL, name TEXT NOT NULL, " +
+                    "isSelf INTEGER NOT NULL, createdAtMillis INTEGER NOT NULL, PRIMARY KEY(id))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS speaker_voice_samples (id TEXT NOT NULL, " +
+                    "personId TEXT NOT NULL, modelId TEXT NOT NULL, vector BLOB NOT NULL, " +
+                    "origin TEXT NOT NULL, memoId TEXT, startMillis INTEGER, endMillis INTEGER, " +
+                    "inputChannel TEXT, audioFileName TEXT, speechMillis INTEGER NOT NULL, " +
+                    "createdAtMillis INTEGER NOT NULL, PRIMARY KEY(id), " +
+                    "FOREIGN KEY(personId) REFERENCES speaker_persons(id) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_speaker_voice_samples_personId ON speaker_voice_samples (personId)",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS speaker_local_voiceprints (memoId TEXT NOT NULL, " +
+                    "jobId TEXT NOT NULL, chunkIndex INTEGER NOT NULL, localSpeaker INTEGER NOT NULL, " +
+                    "startSample INTEGER NOT NULL, activeFrames BLOB NOT NULL, vector BLOB NOT NULL, " +
+                    "PRIMARY KEY(jobId, chunkIndex, localSpeaker), " +
+                    "FOREIGN KEY(memoId) REFERENCES memos(id) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_speaker_local_voiceprints_memoId ON speaker_local_voiceprints (memoId)",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS speaker_analyses (jobId TEXT NOT NULL, " +
+                    "memoId TEXT NOT NULL, modelId TEXT NOT NULL, sampleCount INTEGER NOT NULL, " +
+                    "voiceprintCount INTEGER NOT NULL, analysedAtMillis INTEGER NOT NULL, timeline BLOB, " +
+                    "profileKey TEXT, labelledAtMillis INTEGER, PRIMARY KEY(jobId), " +
+                    "FOREIGN KEY(memoId) REFERENCES memos(id) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_speaker_analyses_memoId ON speaker_analyses (memoId)",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS speaker_segment_overrides (memoId TEXT NOT NULL, " +
+                    "jobId TEXT NOT NULL, segmentId TEXT NOT NULL, label TEXT NOT NULL, " +
+                    "updatedAtMillis INTEGER NOT NULL, PRIMARY KEY(jobId, segmentId), " +
+                    "FOREIGN KEY(memoId) REFERENCES memos(id) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_speaker_segment_overrides_memoId ON speaker_segment_overrides (memoId)",
+                )
+            }
+        }
+
+        /** Word timestamps for Parakeet windows; existing rows keep NULL. */
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transcript_chunks ADD COLUMN timedWordsJson TEXT")
+            }
+        }
 
         internal val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(db: SupportSQLiteDatabase) {

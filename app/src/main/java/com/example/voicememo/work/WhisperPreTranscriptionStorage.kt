@@ -1,5 +1,6 @@
 package com.example.voicememo.work
 
+import com.example.voicememo.transcription.TimedWordsCodec
 import com.example.voicememo.transcription.WhisperChunkResult
 import java.io.File
 import org.json.JSONArray
@@ -26,6 +27,7 @@ internal object WhisperPreTranscriptionStorage {
         index: Int,
         fingerprint: String,
         result: WhisperChunkResult,
+        includeTimedWords: Boolean = false,
     ) {
         val destination = resultFile(directory, index)
         val temporary = File(directory, "${destination.name}.tmp")
@@ -39,6 +41,7 @@ internal object WhisperPreTranscriptionStorage {
             .put("inferenceMillis", result.inferenceMillis)
             .put("truncated", result.truncated)
             .put("warnings", JSONArray(result.warnings))
+        if (includeTimedWords) json.put("timedWords", TimedWordsCodec.encode(result.timedSegments))
         temporary.writeText(json.toString())
         check(temporary.renameTo(destination)) {
             "Could not publish pre-transcription result ${destination.name}."
@@ -65,6 +68,8 @@ internal object WhisperPreTranscriptionStorage {
             inferenceMillis = json.optLong("inferenceMillis"),
             truncated = json.optBoolean("truncated"),
             warnings = List(warningsJson.length(), warningsJson::getString),
+            timedSegments = TimedWordsCodec.decode(json.optString("timedWords", "").ifEmpty { null })
+                .orEmpty(),
         )
     }
 }
